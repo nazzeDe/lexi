@@ -58,6 +58,7 @@ lexi hello
 lexi "take off" hello
 lexi hello --dictionary oxford
 lexi hello --show-dictionary
+lexi hello --raw
 lexi --import oxford.jsonl --name oxford
 lexi --import oxford.jsonl --name oxford --force
 lexi --list
@@ -68,6 +69,7 @@ lexi --version
 
 `--import` 必须同时给 `--name`。同名词典默认报错；`--force` 原子替换，失败时保留原词典。
 `--list` 每行 `名称<TAB>词条数`。`--remove` 不确认。不带参数与 `--help` 相同。
+查询默认把 HTML 词条转成终端易读文本；`--raw` 输出库里保存的原文。
 
 ## 数据位置
 

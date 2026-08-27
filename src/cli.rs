@@ -24,6 +24,9 @@ pub struct Cli {
     #[arg(long)]
     pub show_dictionary: bool,
 
+    #[arg(long)]
+    pub raw: bool,
+
     #[arg(long, value_name = "PATH")]
     pub import: Option<PathBuf>,
 
@@ -54,6 +57,7 @@ pub enum Mode {
         headwords: Vec<String>,
         dictionaries: Vec<String>,
         show_dictionary: bool,
+        raw: bool,
     },
     Import {
         path: PathBuf,
@@ -124,7 +128,11 @@ fn validate(cli: Cli) -> Result<Mode, clap::Error> {
 
     if cli.help || cli.version {
         reject_if(
-            cli.name.is_some() || cli.force || !cli.dictionary.is_empty() || cli.show_dictionary,
+            cli.name.is_some()
+                || cli.force
+                || !cli.dictionary.is_empty()
+                || cli.show_dictionary
+                || cli.raw,
             "--help and --version do not accept business options",
         )?;
         return Ok(if cli.help { Mode::Help } else { Mode::Version });
@@ -139,13 +147,14 @@ fn validate(cli: Cli) -> Result<Mode, clap::Error> {
             headwords: cli.headwords,
             dictionaries: cli.dictionary,
             show_dictionary: cli.show_dictionary,
+            raw: cli.raw,
         });
     }
 
     if has_import {
         reject_if(
-            !cli.dictionary.is_empty() || cli.show_dictionary,
-            "--dictionary and --show-dictionary are only valid with query mode",
+            !cli.dictionary.is_empty() || cli.show_dictionary || cli.raw,
+            "--dictionary, --show-dictionary, and --raw are only valid with query mode",
         )?;
         let name = cli
             .name
@@ -165,14 +174,22 @@ fn validate(cli: Cli) -> Result<Mode, clap::Error> {
 
     if has_list {
         reject_if(
-            cli.name.is_some() || cli.force || !cli.dictionary.is_empty() || cli.show_dictionary,
+            cli.name.is_some()
+                || cli.force
+                || !cli.dictionary.is_empty()
+                || cli.show_dictionary
+                || cli.raw,
             "--list does not accept import or query options",
         )?;
         return Ok(Mode::List);
     }
 
     reject_if(
-        cli.name.is_some() || cli.force || !cli.dictionary.is_empty() || cli.show_dictionary,
+        cli.name.is_some()
+            || cli.force
+            || !cli.dictionary.is_empty()
+            || cli.show_dictionary
+            || cli.raw,
         "--remove does not accept import or query options",
     )?;
     Ok(Mode::Remove {
@@ -203,7 +220,19 @@ mod tests {
         assert_eq!(parse_from(["lexi", "--version"]).unwrap(), Mode::Version);
         assert!(matches!(
             parse_from(["lexi", "hello"]).unwrap(),
-            Mode::Query { .. }
+            Mode::Query {
+                raw: false,
+                show_dictionary: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_from(["lexi", "hello", "--raw", "--show-dictionary"]).unwrap(),
+            Mode::Query {
+                raw: true,
+                show_dictionary: true,
+                ..
+            }
         ));
         assert!(matches!(
             parse_from(["lexi", "--import", "dict.jsonl", "--name", "  Test Dict  "]).unwrap(),
@@ -234,6 +263,7 @@ mod tests {
             vec!["lexi", "hello", "--list"],
             vec!["lexi", "--list", "--force"],
             vec!["lexi", "--remove", "test", "--show-dictionary"],
+            vec!["lexi", "--list", "--raw"],
             vec!["lexi", "--import", "dict.jsonl"],
             vec!["lexi", "--import", "dict.jsonl", "--name", "   "],
             vec!["lexi", "--list", "--help"],

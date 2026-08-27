@@ -77,6 +77,7 @@ fn run(mode: Mode) -> Result<u8, CommandError> {
             headwords,
             dictionaries,
             show_dictionary,
+            raw,
         } => {
             let terms = headwords
                 .iter()
@@ -96,6 +97,7 @@ fn run(mode: Mode) -> Result<u8, CommandError> {
                 &terms,
                 &dictionaries,
                 show_dictionary,
+                raw,
                 &mut stdout,
                 &mut stderr,
             )

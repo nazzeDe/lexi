@@ -373,6 +373,33 @@ fn output_bytes_match_the_text_contract() {
 }
 
 #[test]
+fn default_query_renders_html_and_raw_keeps_stored_text() {
+    let data_home = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    import(
+        data_home.path(),
+        files.path(),
+        "oxford",
+        "{\"headword\":\"hello\",\"definition\":\"<span>hello &amp; world</span>\"}\n",
+    );
+
+    let readable = run(data_home.path(), &["hello"]);
+    assert_eq!(
+        readable.status.code(),
+        Some(0),
+        "{}",
+        text(&readable.stderr)
+    );
+    assert_eq!(text(&readable.stdout), "hello\nhello & world\n");
+    assert!(readable.stderr.is_empty());
+
+    let raw = run(data_home.path(), &["hello", "--raw"]);
+    assert_eq!(raw.status.code(), Some(0), "{}", text(&raw.stderr));
+    assert_eq!(text(&raw.stdout), "hello\n<span>hello &amp; world</span>\n");
+    assert!(raw.stderr.is_empty());
+}
+
+#[test]
 fn duplicate_query_headwords_are_looked_up_independently() {
     let data_home = TempDir::new().unwrap();
     let files = TempDir::new().unwrap();

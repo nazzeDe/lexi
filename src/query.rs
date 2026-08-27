@@ -17,6 +17,7 @@ pub fn run(
     terms: &[QueryTerm],
     dictionaries: &[DictionaryName],
     show_dictionary: bool,
+    raw: bool,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<Outcome> {
@@ -42,6 +43,7 @@ pub fn run(
                 entry.headword(),
                 entry.definition(),
                 show_dictionary,
+                raw,
                 first_record,
             )
             .context("failed to write query result to stdout")?;
@@ -116,6 +118,7 @@ mod tests {
             &[term("hello")],
             &[],
             false,
+            false,
             &mut stdout,
             &mut stderr,
         )
@@ -143,6 +146,7 @@ mod tests {
             &[term("hello")],
             &[],
             true,
+            false,
             &mut stdout,
             &mut stderr,
         )
@@ -165,6 +169,7 @@ mod tests {
             &[term("hello")],
             &[],
             false,
+            false,
             &mut stdout,
             &mut stderr,
         )
@@ -184,6 +189,7 @@ mod tests {
             &storage,
             &[term("hello"), term("helo"), term("hello")],
             &[],
+            false,
             false,
             &mut stdout,
             &mut stderr,

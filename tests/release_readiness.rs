@@ -143,6 +143,7 @@ fn readme_documents_build_jsonl_boundary_and_commands() {
         "--remove",
         "--dictionary",
         "--show-dictionary",
+        "--raw",
         "--help",
         "--version",
         "XDG_DATA_HOME",

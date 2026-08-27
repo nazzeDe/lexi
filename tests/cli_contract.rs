@@ -38,6 +38,7 @@ fn no_arguments_matches_long_help_without_opening_the_database() {
     assert!(text(&no_args.stdout).contains("Usage: lexi"));
     assert!(text(&no_args.stdout).contains("--import <PATH>"));
     assert!(text(&no_args.stdout).contains("--show-dictionary"));
+    assert!(text(&no_args.stdout).contains("--raw"));
     assert!(no_args.stderr.is_empty());
     assert!(help.stderr.is_empty());
     assert!(!data_home.path().join("lexi/lexi.db").exists());
@@ -61,6 +62,7 @@ fn invalid_arguments_and_mode_conflicts_exit_two_on_stderr() {
         vec!["hello", "--list"],
         vec!["--list", "--force"],
         vec!["--remove", "oxford", "--show-dictionary"],
+        vec!["--list", "--raw"],
         vec!["--import", "dict.jsonl"],
         vec!["--import", "dict.jsonl", "--name", "   "],
         vec!["--import", "dict.jsonl", "--name", ""],
