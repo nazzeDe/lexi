@@ -306,6 +306,31 @@ fn validation_failures_include_path_and_line_and_exit_three() {
             "at line 3",
             "leading or trailing whitespace",
         ),
+        (
+            b"{\"definition\":\"only\"}\n",
+            "at line 1",
+            "missing field `headword`",
+        ),
+        (
+            b"{\"headword\":\"only\"}\n",
+            "at line 1",
+            "missing field `definition`",
+        ),
+        (
+            b"{\"headword\":1,\"definition\":\"b\"}\n",
+            "at line 1",
+            "invalid type",
+        ),
+        (
+            b"{\"headword\":\"a\",\"definition\":\"\"}\n",
+            "at line 1",
+            "definition must be a non-whitespace string",
+        ),
+        (
+            b"{\"headword\":\"a\\tb\",\"definition\":\"b\"}\n",
+            "at line 1",
+            "control characters",
+        ),
     ];
 
     for (contents, line, reason) in cases {

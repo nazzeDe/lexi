@@ -307,6 +307,8 @@ fn insert_entries(
     name: &DictionaryName,
     entries: impl IntoIterator<Item = Result<Entry>>,
 ) -> Result<u64> {
+    // One prepared INSERT for the whole file; import memory stays tied to the
+    // current JSONL line rather than growing with file size.
     let mut insert = tx
         .prepare(
             "INSERT INTO entries (

@@ -1,3 +1,9 @@
+//! Line-oriented JSONL import.
+//!
+//! Records are decoded one line at a time so a ~500 MB file does not need to
+//! be loaded into memory. Callers iterate `Reader` and persist inside one
+//! SQLite transaction.
+
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};

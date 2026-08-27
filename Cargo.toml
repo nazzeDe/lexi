@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+# System libsqlite3 via pkg-config. Do not enable the `bundled` feature.
 rusqlite = "0.37"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
