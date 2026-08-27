@@ -92,11 +92,12 @@ mod tests {
         let mut storage = Storage::open_at(directory.path().join("lexi.db")).unwrap();
         for (name, records) in dictionaries {
             storage
-                .import_new_dictionary(
+                .import_dictionary(
                     &DictionaryName::parse(name).unwrap(),
                     records.iter().map(|(headword, definition)| {
                         Ok::<_, anyhow::Error>(entry(headword, definition))
                     }),
+                    false,
                 )
                 .unwrap();
         }

@@ -20,6 +20,12 @@ pub struct DictionaryScope {
     ids: Option<Vec<i64>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportOutcome {
+    Created(u64),
+    Replaced(u64),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredEntry {
     dictionary_name: String,
@@ -151,73 +157,63 @@ impl Storage {
         }
     }
 
-    pub fn import_new_dictionary(
+    pub fn import_dictionary(
         &mut self,
         name: &DictionaryName,
         entries: impl IntoIterator<Item = Result<Entry>>,
-    ) -> Result<u64> {
-        // One IMMEDIATE transaction: any record, I/O, or constraint failure rolls back completely.
+        replace_existing: bool,
+    ) -> Result<ImportOutcome> {
+        // One IMMEDIATE transaction: old-row delete, new inserts, and name/count updates share fate.
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .context("failed to start import transaction")?;
 
-        let existing: Option<String> = tx
+        let existing: Option<(i64, String)> = tx
             .query_row(
-                "SELECT name FROM dictionaries WHERE normalized_name = ?1",
+                "SELECT id, name FROM dictionaries WHERE normalized_name = ?1",
                 [name.normalized()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .context("failed to check for an existing dictionary")?;
-        if let Some(existing) = existing {
-            bail!("dictionary '{existing}' already exists");
-        }
 
-        tx.execute(
-            "INSERT INTO dictionaries (name, normalized_name, entry_count) VALUES (?1, ?2, 0)",
-            params![name.display(), name.normalized()],
-        )
-        .with_context(|| format!("failed to create dictionary '{}'", name.display()))?;
-        let dictionary_id = tx.last_insert_rowid();
-
-        let entry_count = {
-            let mut insert = tx
-                .prepare(
-                    "INSERT INTO entries (
-                         dictionary_id, sequence, headword, folded_headword, definition
-                     ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                )
-                .context("failed to prepare entry insert")?;
-            let mut count = 0u64;
-            for entry in entries {
-                let entry = entry?;
-                count += 1;
-                insert
-                    .execute(params![
-                        dictionary_id,
-                        count as i64,
-                        entry.headword(),
-                        entry.folded_headword(),
-                        entry.definition(),
-                    ])
+        let (dictionary_id, replaced) = match existing {
+            Some((_id, existing_name)) if !replace_existing => {
+                bail!("dictionary '{existing_name}' already exists");
+            }
+            Some((id, _)) => {
+                tx.execute("DELETE FROM entries WHERE dictionary_id = ?1", [id])
                     .with_context(|| {
                         format!(
-                            "failed to insert entry {count} into dictionary '{}'",
+                            "failed to remove existing entries for dictionary '{}'",
                             name.display()
                         )
                     })?;
+                (id, true)
             }
-            count
+            None => {
+                tx.execute(
+                    "INSERT INTO dictionaries (name, normalized_name, entry_count) VALUES (?1, ?2, 0)",
+                    params![name.display(), name.normalized()],
+                )
+                .with_context(|| format!("failed to create dictionary '{}'", name.display()))?;
+                (tx.last_insert_rowid(), false)
+            }
         };
 
+        let entry_count = insert_entries(&tx, dictionary_id, name, entries)?;
         tx.execute(
-            "UPDATE dictionaries SET entry_count = ?1 WHERE id = ?2",
-            params![entry_count as i64, dictionary_id],
+            "UPDATE dictionaries SET name = ?1, entry_count = ?2 WHERE id = ?3",
+            params![name.display(), entry_count as i64, dictionary_id],
         )
-        .context("failed to update imported entry count")?;
+        .context("failed to update imported dictionary name and entry count")?;
         tx.commit().context("failed to commit import transaction")?;
-        Ok(entry_count)
+        Ok(if replaced {
+            ImportOutcome::Replaced(entry_count)
+        } else {
+            ImportOutcome::Created(entry_count)
+        })
     }
 }
 
@@ -276,6 +272,41 @@ fn collect_lookup(
         .context("failed to read lookup results")
 }
 
+fn insert_entries(
+    tx: &rusqlite::Transaction<'_>,
+    dictionary_id: i64,
+    name: &DictionaryName,
+    entries: impl IntoIterator<Item = Result<Entry>>,
+) -> Result<u64> {
+    let mut insert = tx
+        .prepare(
+            "INSERT INTO entries (
+                 dictionary_id, sequence, headword, folded_headword, definition
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .context("failed to prepare entry insert")?;
+    let mut count = 0u64;
+    for entry in entries {
+        let entry = entry?;
+        count += 1;
+        insert
+            .execute(params![
+                dictionary_id,
+                count as i64,
+                entry.headword(),
+                entry.folded_headword(),
+                entry.definition(),
+            ])
+            .with_context(|| {
+                format!(
+                    "failed to insert entry {count} into dictionary '{}'",
+                    name.display()
+                )
+            })?;
+    }
+    Ok(count)
+}
+
 fn initialize_schema(connection: &Connection) -> Result<()> {
     connection.execute_batch(&format!(
         "BEGIN IMMEDIATE;
@@ -308,7 +339,7 @@ mod tests {
     use rusqlite::{Connection, params};
     use tempfile::TempDir;
 
-    use super::{SCHEMA_VERSION, Storage};
+    use super::{ImportOutcome, SCHEMA_VERSION, Storage};
     use crate::record::{DictionaryName, Entry};
 
     fn database_path(directory: &TempDir) -> std::path::PathBuf {
@@ -328,6 +359,37 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()
+    }
+
+    fn import_ok(
+        storage: &mut Storage,
+        name: &str,
+        records: impl IntoIterator<Item = Entry>,
+        replace_existing: bool,
+    ) -> ImportOutcome {
+        storage
+            .import_dictionary(
+                &DictionaryName::parse(name).unwrap(),
+                records.into_iter().map(Ok),
+                replace_existing,
+            )
+            .unwrap()
+    }
+
+    fn folded_lookup(storage: &Storage, folded: &str) -> Vec<(String, String, String)> {
+        let scope = storage.resolve_dictionaries(&[]).unwrap();
+        storage
+            .lookup_folded(folded, &scope)
+            .unwrap()
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry.dictionary_name().to_string(),
+                    entry.headword().to_string(),
+                    entry.definition().to_string(),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -475,19 +537,18 @@ mod tests {
     fn import_persists_duplicates_in_order_and_preserves_display_name() {
         let directory = TempDir::new().unwrap();
         let mut storage = Storage::open_at(database_path(&directory)).unwrap();
-        let name = DictionaryName::parse("  Oxford  ").unwrap();
-        let count = storage
-            .import_new_dictionary(
-                &name,
-                [
-                    Ok(entry("hello", "first")),
-                    Ok(entry("hello", "second")),
-                    Ok(entry("take off", "phrasal")),
-                ],
-            )
-            .unwrap();
+        let outcome = import_ok(
+            &mut storage,
+            "  Oxford  ",
+            [
+                entry("hello", "first"),
+                entry("hello", "second"),
+                entry("take off", "phrasal"),
+            ],
+            false,
+        );
 
-        assert_eq!(count, 3);
+        assert_eq!(outcome, ImportOutcome::Created(3));
         assert_eq!(
             storage.list_dictionaries().unwrap(),
             vec![("Oxford".into(), 3)]
@@ -506,17 +567,13 @@ mod tests {
     fn import_rejects_the_same_normalized_name_and_leaves_the_original() {
         let directory = TempDir::new().unwrap();
         let mut storage = Storage::open_at(database_path(&directory)).unwrap();
-        storage
-            .import_new_dictionary(
-                &DictionaryName::parse("Oxford").unwrap(),
-                [Ok(entry("a", "one"))],
-            )
-            .unwrap();
+        import_ok(&mut storage, "Oxford", [entry("a", "one")], false);
 
         let error = storage
-            .import_new_dictionary(
+            .import_dictionary(
                 &DictionaryName::parse("oxford").unwrap(),
                 [Ok(entry("b", "two"))],
+                false,
             )
             .unwrap_err();
 
@@ -538,12 +595,7 @@ mod tests {
     fn import_rolls_back_partial_records_on_a_later_failure() {
         let directory = TempDir::new().unwrap();
         let mut storage = Storage::open_at(database_path(&directory)).unwrap();
-        storage
-            .import_new_dictionary(
-                &DictionaryName::parse("keep").unwrap(),
-                [Ok(entry("safe", "yes"))],
-            )
-            .unwrap();
+        import_ok(&mut storage, "keep", [entry("safe", "yes")], false);
 
         let entries: [Result<Entry>; 3] = [
             Ok(entry("one", "1")),
@@ -551,7 +603,7 @@ mod tests {
             Err(anyhow!("invalid JSONL record in doomed.jsonl at line 3")),
         ];
         let error = storage
-            .import_new_dictionary(&DictionaryName::parse("doomed").unwrap(), entries)
+            .import_dictionary(&DictionaryName::parse("doomed").unwrap(), entries, false)
             .unwrap_err();
 
         assert!(format!("{error:#}").contains("at line 3"), "{error:#}");
@@ -598,18 +650,13 @@ mod tests {
     fn lookup_returns_duplicates_across_dictionaries_in_primary_key_order() {
         let directory = TempDir::new().unwrap();
         let mut storage = Storage::open_at(database_path(&directory)).unwrap();
-        storage
-            .import_new_dictionary(
-                &DictionaryName::parse("oxford").unwrap(),
-                [Ok(entry("Hello", "1")), Ok(entry("hello", "2"))],
-            )
-            .unwrap();
-        storage
-            .import_new_dictionary(
-                &DictionaryName::parse("longman").unwrap(),
-                [Ok(entry("HELLO", "3"))],
-            )
-            .unwrap();
+        import_ok(
+            &mut storage,
+            "oxford",
+            [entry("Hello", "1"), entry("hello", "2")],
+            false,
+        );
+        import_ok(&mut storage, "longman", [entry("HELLO", "3")], false);
 
         let scope = storage.resolve_dictionaries(&[]).unwrap();
         let found = storage.lookup_folded("hello", &scope).unwrap();
@@ -636,18 +683,8 @@ mod tests {
     fn lookup_filter_is_case_insensitive_and_does_not_multiply_repeated_names() {
         let directory = TempDir::new().unwrap();
         let mut storage = Storage::open_at(database_path(&directory)).unwrap();
-        storage
-            .import_new_dictionary(
-                &DictionaryName::parse("Oxford").unwrap(),
-                [Ok(entry("hello", "oxford"))],
-            )
-            .unwrap();
-        storage
-            .import_new_dictionary(
-                &DictionaryName::parse("longman").unwrap(),
-                [Ok(entry("hello", "longman"))],
-            )
-            .unwrap();
+        import_ok(&mut storage, "Oxford", [entry("hello", "oxford")], false);
+        import_ok(&mut storage, "longman", [entry("hello", "longman")], false);
 
         let names = [
             DictionaryName::parse("OXFORD").unwrap(),
@@ -668,12 +705,7 @@ mod tests {
     fn resolve_dictionaries_rejects_unknown_names() {
         let directory = TempDir::new().unwrap();
         let mut storage = Storage::open_at(database_path(&directory)).unwrap();
-        storage
-            .import_new_dictionary(
-                &DictionaryName::parse("oxford").unwrap(),
-                [Ok(entry("hello", "def"))],
-            )
-            .unwrap();
+        import_ok(&mut storage, "oxford", [entry("hello", "def")], false);
 
         let error = storage
             .resolve_dictionaries(&[DictionaryName::parse("missing").unwrap()])
@@ -688,18 +720,8 @@ mod tests {
     fn lookup_query_plan_uses_the_folded_headword_index() {
         let directory = TempDir::new().unwrap();
         let mut storage = Storage::open_at(database_path(&directory)).unwrap();
-        storage
-            .import_new_dictionary(
-                &DictionaryName::parse("oxford").unwrap(),
-                [Ok(entry("hello", "def"))],
-            )
-            .unwrap();
-        storage
-            .import_new_dictionary(
-                &DictionaryName::parse("longman").unwrap(),
-                [Ok(entry("hello", "other"))],
-            )
-            .unwrap();
+        import_ok(&mut storage, "oxford", [entry("hello", "def")], false);
+        import_ok(&mut storage, "longman", [entry("hello", "other")], false);
 
         let unfiltered = explain_lookup(
             &storage,
@@ -714,5 +736,171 @@ mod tests {
             rusqlite::params!["hello", 1i64, 2i64],
         );
         assert_lookup_uses_index(&filtered);
+    }
+
+    #[test]
+    fn force_create_when_missing_is_a_normal_import() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+
+        let outcome = import_ok(&mut storage, "oxford", [entry("a", "one")], true);
+
+        assert_eq!(outcome, ImportOutcome::Created(1));
+        assert_eq!(
+            storage.list_dictionaries().unwrap(),
+            vec![("oxford".into(), 1)]
+        );
+        assert_eq!(
+            stored_entries(&storage),
+            vec![("a".into(), "one".into(), 1)]
+        );
+    }
+
+    #[test]
+    fn replace_overwrites_name_count_records_and_lookup_order() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+        import_ok(
+            &mut storage,
+            "Oxford",
+            [entry("old", "first"), entry("old", "second")],
+            false,
+        );
+        import_ok(&mut storage, "keep", [entry("safe", "yes")], false);
+
+        let outcome = import_ok(
+            &mut storage,
+            "oxford",
+            [
+                entry("hello", "new one"),
+                entry("hello", "new two"),
+                entry("world", "three"),
+            ],
+            true,
+        );
+
+        assert_eq!(outcome, ImportOutcome::Replaced(3));
+        assert_eq!(
+            storage.list_dictionaries().unwrap(),
+            vec![("oxford".into(), 3), ("keep".into(), 1)]
+        );
+        assert_eq!(
+            stored_entries(&storage),
+            vec![
+                ("safe".into(), "yes".into(), 1),
+                ("hello".into(), "new one".into(), 1),
+                ("hello".into(), "new two".into(), 2),
+                ("world".into(), "three".into(), 3),
+            ]
+        );
+        assert!(folded_lookup(&storage, "old").is_empty());
+        assert_eq!(
+            folded_lookup(&storage, "hello"),
+            vec![
+                ("oxford".into(), "hello".into(), "new one".into()),
+                ("oxford".into(), "hello".into(), "new two".into()),
+            ]
+        );
+        assert_eq!(
+            folded_lookup(&storage, "safe"),
+            vec![("keep".into(), "safe".into(), "yes".into())]
+        );
+    }
+
+    #[test]
+    fn replace_matches_normalized_names_case_insensitively() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+        import_ok(&mut storage, "Oxford", [entry("Hello", "old")], false);
+
+        let outcome = import_ok(&mut storage, "OXFORD", [entry("hello", "new")], true);
+
+        assert_eq!(outcome, ImportOutcome::Replaced(1));
+        assert_eq!(
+            storage.list_dictionaries().unwrap(),
+            vec![("OXFORD".into(), 1)]
+        );
+        assert_eq!(
+            stored_entries(&storage),
+            vec![("hello".into(), "new".into(), 1)]
+        );
+    }
+
+    #[test]
+    fn replace_rolls_back_iterator_failure_and_keeps_old_lookup() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+        import_ok(
+            &mut storage,
+            "Oxford",
+            [entry("old", "first"), entry("old", "second")],
+            false,
+        );
+        import_ok(&mut storage, "keep", [entry("safe", "yes")], false);
+        let before_list = storage.list_dictionaries().unwrap();
+        let before_entries = stored_entries(&storage);
+        let before_lookup = folded_lookup(&storage, "old");
+
+        let entries: [Result<Entry>; 3] = [
+            Ok(entry("one", "1")),
+            Ok(entry("two", "2")),
+            Err(anyhow!("failed to read doomed.jsonl at line 3")),
+        ];
+        let error = storage
+            .import_dictionary(&DictionaryName::parse("oxford").unwrap(), entries, true)
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("at line 3"), "{error:#}");
+        assert_eq!(storage.list_dictionaries().unwrap(), before_list);
+        assert_eq!(stored_entries(&storage), before_entries);
+        assert_eq!(folded_lookup(&storage, "old"), before_lookup);
+        assert_eq!(
+            before_lookup,
+            vec![
+                ("Oxford".into(), "old".into(), "first".into()),
+                ("Oxford".into(), "old".into(), "second".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn replace_rolls_back_sqlite_insert_failure() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+        import_ok(
+            &mut storage,
+            "Oxford",
+            [entry("old", "first"), entry("old", "second")],
+            false,
+        );
+        let before_list = storage.list_dictionaries().unwrap();
+        let before_entries = stored_entries(&storage);
+        let before_lookup = folded_lookup(&storage, "old");
+
+        storage
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_replace BEFORE INSERT ON entries
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected sqlite failure');
+                 END;",
+            )
+            .unwrap();
+
+        let error = storage
+            .import_dictionary(
+                &DictionaryName::parse("oxford").unwrap(),
+                [Ok(entry("hello", "new"))],
+                true,
+            )
+            .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("injected sqlite failure"),
+            "{error:#}"
+        );
+        assert_eq!(storage.list_dictionaries().unwrap(), before_list);
+        assert_eq!(stored_entries(&storage), before_entries);
+        assert_eq!(folded_lookup(&storage, "old"), before_lookup);
     }
 }

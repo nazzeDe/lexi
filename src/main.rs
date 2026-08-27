@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use cli::Mode;
 use record::{DictionaryName, QueryTerm};
-use storage::Storage;
+use storage::{ImportOutcome, Storage};
 
 const EXIT_SUCCESS: u8 = 0;
 const EXIT_NOT_FOUND: u8 = 1;
@@ -105,14 +105,18 @@ fn run(mode: Mode) -> Result<u8, CommandError> {
                 query::Outcome::SomeMissing => Ok(EXIT_NOT_FOUND),
             }
         }
-        Mode::Import { path, name, .. } => {
+        Mode::Import { path, name, force } => {
             let name = DictionaryName::parse(&name).map_err(CommandError::Argument)?;
             let records = jsonl::open(&path).map_err(CommandError::Runtime)?;
             let mut storage = Storage::open().map_err(CommandError::Runtime)?;
-            let count = storage
-                .import_new_dictionary(&name, records)
+            let outcome = storage
+                .import_dictionary(&name, records, force)
                 .map_err(CommandError::Runtime)?;
-            writeln!(stdout, "Imported {}: {count} entries", name.display())
+            let (label, count) = match outcome {
+                ImportOutcome::Created(count) => ("Imported", count),
+                ImportOutcome::Replaced(count) => ("Replaced", count),
+            };
+            writeln!(stdout, "{label} {}: {count} entries", name.display())
                 .context("failed to write import result to stdout")
                 .map_err(CommandError::Runtime)?;
             Ok(EXIT_SUCCESS)

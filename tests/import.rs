@@ -113,6 +113,152 @@ fn first_import_with_force_still_creates_a_new_dictionary() {
 
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
     assert_eq!(text(&output.stdout), "Imported oxford: 1 entries\n");
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        dictionary_rows(data_home.path()),
+        vec![("oxford".into(), "oxford".into(), 1)]
+    );
+    assert_eq!(
+        entry_rows(data_home.path()),
+        vec![("a".into(), "a".into(), "one".into(), 1)]
+    );
+    let query = run(data_home.path(), &["a"]);
+    assert_eq!(query.status.code(), Some(0), "{}", text(&query.stderr));
+    assert_eq!(text(&query.stdout), "a\none\n");
+}
+
+#[test]
+fn force_replaces_only_the_matching_dictionary_and_prints_replaced() {
+    let data_home = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    let original = write_jsonl(
+        files.path(),
+        "{\"headword\":\"old\",\"definition\":\"keep me\"}\n\
+         {\"headword\":\"old\",\"definition\":\"second\"}\n",
+    );
+    let first = run(
+        data_home.path(),
+        &["--import", original.to_str().unwrap(), "--name", "oxford"],
+    );
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+
+    let neighbor = files.path().join("longman.jsonl");
+    fs::write(
+        &neighbor,
+        "{\"headword\":\"old\",\"definition\":\"other dict\"}\n",
+    )
+    .unwrap();
+    let kept = run(
+        data_home.path(),
+        &["--import", neighbor.to_str().unwrap(), "--name", "longman"],
+    );
+    assert_eq!(kept.status.code(), Some(0), "{}", text(&kept.stderr));
+
+    let replacement = files.path().join("new.jsonl");
+    fs::write(
+        &replacement,
+        "{\"headword\":\"hello\",\"definition\":\"new one\"}\n\
+         {\"headword\":\"hello\",\"definition\":\"new two\"}\n\
+         {\"headword\":\"world\",\"definition\":\"three\"}\n",
+    )
+    .unwrap();
+    let output = run(
+        data_home.path(),
+        &[
+            "--import",
+            replacement.to_str().unwrap(),
+            "--name",
+            "oxford",
+            "--force",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(text(&output.stdout), "Replaced oxford: 3 entries\n");
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        text(&run(data_home.path(), &["--list"]).stdout),
+        "oxford\t3\nlongman\t1\n",
+    );
+    assert_eq!(
+        dictionary_rows(data_home.path()),
+        vec![
+            ("oxford".into(), "oxford".into(), 3),
+            ("longman".into(), "longman".into(), 1),
+        ]
+    );
+    assert_eq!(
+        entry_rows(data_home.path()),
+        vec![
+            ("old".into(), "old".into(), "other dict".into(), 1),
+            ("hello".into(), "hello".into(), "new one".into(), 1),
+            ("hello".into(), "hello".into(), "new two".into(), 2),
+            ("world".into(), "world".into(), "three".into(), 3),
+        ]
+    );
+
+    let missed = run(data_home.path(), &["old", "--dictionary", "oxford"]);
+    assert_eq!(missed.status.code(), Some(1), "{}", text(&missed.stderr));
+    assert!(text(&missed.stderr).contains("No entry found for: old"));
+    let found = run(
+        data_home.path(),
+        &["hello", "--dictionary", "oxford", "--show-dictionary"],
+    );
+    assert_eq!(found.status.code(), Some(0), "{}", text(&found.stderr));
+    assert_eq!(
+        text(&found.stdout),
+        "[oxford] hello\nnew one\n\n[oxford] hello\nnew two\n",
+    );
+}
+
+#[test]
+fn force_replaces_a_case_insensitive_name_match() {
+    let data_home = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    let original = write_jsonl(
+        files.path(),
+        "{\"headword\":\"Hello\",\"definition\":\"old Oxford\"}\n",
+    );
+    let first = run(
+        data_home.path(),
+        &["--import", original.to_str().unwrap(), "--name", "Oxford"],
+    );
+    assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
+
+    let replacement = files.path().join("new.jsonl");
+    fs::write(
+        &replacement,
+        "{\"headword\":\"hello\",\"definition\":\"new oxford\"}\n",
+    )
+    .unwrap();
+    let output = run(
+        data_home.path(),
+        &[
+            "--import",
+            replacement.to_str().unwrap(),
+            "--name",
+            "oxford",
+            "--force",
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(text(&output.stdout), "Replaced oxford: 1 entries\n");
+    assert_eq!(
+        text(&run(data_home.path(), &["--list"]).stdout),
+        "oxford\t1\n",
+    );
+    assert_eq!(
+        dictionary_rows(data_home.path()),
+        vec![("oxford".into(), "oxford".into(), 1)]
+    );
+    assert_eq!(
+        entry_rows(data_home.path()),
+        vec![("hello".into(), "hello".into(), "new oxford".into(), 1)]
+    );
+    let found = run(data_home.path(), &["hello", "--show-dictionary"]);
+    assert_eq!(found.status.code(), Some(0), "{}", text(&found.stderr));
+    assert_eq!(text(&found.stdout), "[oxford] hello\nnew oxford\n");
 }
 
 #[test]
@@ -297,4 +443,167 @@ fn missing_jsonl_is_a_runtime_error() {
     assert!(text(&output.stderr).contains("failed to open JSONL file"));
     assert!(text(&output.stderr).contains(&missing.display().to_string()));
     assert!(!data_home.path().join("lexi/lexi.db").exists());
+}
+
+fn import_named(data_home: &Path, jsonl: &Path, name: &str) {
+    let output = run(
+        data_home,
+        &["--import", jsonl.to_str().unwrap(), "--name", name],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+}
+
+fn seed_oxford_and_keep(data_home: &Path, files: &Path) {
+    let oxford = write_jsonl(
+        files,
+        "{\"headword\":\"old\",\"definition\":\"first\"}\n\
+         {\"headword\":\"old\",\"definition\":\"second\"}\n",
+    );
+    import_named(data_home, &oxford, "Oxford");
+    let keep = files.join("keep.jsonl");
+    fs::write(&keep, "{\"headword\":\"safe\",\"definition\":\"yes\"}\n").unwrap();
+    import_named(data_home, &keep, "keep");
+}
+
+fn assert_original_dictionary_still_usable(data_home: &Path) {
+    assert_eq!(
+        text(&run(data_home, &["--list"]).stdout),
+        "Oxford\t2\nkeep\t1\n",
+    );
+    assert_eq!(
+        dictionary_rows(data_home),
+        vec![
+            ("Oxford".into(), "oxford".into(), 2),
+            ("keep".into(), "keep".into(), 1),
+        ]
+    );
+    assert_eq!(
+        entry_rows(data_home),
+        vec![
+            ("old".into(), "old".into(), "first".into(), 1),
+            ("old".into(), "old".into(), "second".into(), 2),
+            ("safe".into(), "safe".into(), "yes".into(), 1),
+        ]
+    );
+    let query = run(
+        data_home,
+        &["old", "--dictionary", "Oxford", "--show-dictionary"],
+    );
+    assert_eq!(query.status.code(), Some(0), "{}", text(&query.stderr));
+    assert_eq!(
+        text(&query.stdout),
+        "[Oxford] old\nfirst\n\n[Oxford] old\nsecond\n",
+    );
+}
+
+#[test]
+fn jsonl_failure_during_force_replace_leaves_the_old_dictionary_usable() {
+    let data_home = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    seed_oxford_and_keep(data_home.path(), files.path());
+
+    let bad = files.path().join("doomed.jsonl");
+    fs::write(
+        &bad,
+        "{\"headword\":\"one\",\"definition\":\"1\"}\n{\"headword\":\"\",\"definition\":\"no\"}\n",
+    )
+    .unwrap();
+    let failed = run(
+        data_home.path(),
+        &[
+            "--import",
+            bad.to_str().unwrap(),
+            "--name",
+            "oxford",
+            "--force",
+        ],
+    );
+
+    assert_eq!(failed.status.code(), Some(3), "{}", text(&failed.stderr));
+    assert!(failed.stdout.is_empty(), "{}", text(&failed.stdout));
+    let stderr = text(&failed.stderr);
+    assert!(stderr.contains(&bad.display().to_string()), "{stderr}");
+    assert!(stderr.contains("at line 2"), "{stderr}");
+    assert!(
+        !stderr.contains("already exists"),
+        "force must attempt replacement instead of rejecting the name: {stderr}"
+    );
+    assert_original_dictionary_still_usable(data_home.path());
+}
+
+#[test]
+fn io_failure_during_force_replace_leaves_the_old_dictionary_usable() {
+    let data_home = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    seed_oxford_and_keep(data_home.path(), files.path());
+
+    let mut contents = b"{\"headword\":\"one\",\"definition\":\"1\"}\n".to_vec();
+    contents.extend_from_slice(b"\xff\n");
+    let bad = files.path().join("broken.jsonl");
+    fs::write(&bad, contents).unwrap();
+    let failed = run(
+        data_home.path(),
+        &[
+            "--import",
+            bad.to_str().unwrap(),
+            "--name",
+            "oxford",
+            "--force",
+        ],
+    );
+
+    assert_eq!(failed.status.code(), Some(3), "{}", text(&failed.stderr));
+    assert!(failed.stdout.is_empty(), "{}", text(&failed.stdout));
+    let stderr = text(&failed.stderr);
+    assert!(stderr.contains(&bad.display().to_string()), "{stderr}");
+    assert!(stderr.contains("at line 2"), "{stderr}");
+    assert!(
+        !stderr.contains("already exists"),
+        "force must attempt replacement instead of rejecting the name: {stderr}"
+    );
+    assert_original_dictionary_still_usable(data_home.path());
+}
+
+#[test]
+fn sqlite_failure_during_force_replace_leaves_the_old_dictionary_usable() {
+    let data_home = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    seed_oxford_and_keep(data_home.path(), files.path());
+
+    Connection::open(data_home.path().join("lexi/lexi.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER fail_replace BEFORE INSERT ON entries
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected sqlite failure');
+             END;",
+        )
+        .unwrap();
+
+    let replacement = files.path().join("new.jsonl");
+    fs::write(
+        &replacement,
+        "{\"headword\":\"hello\",\"definition\":\"new\"}\n",
+    )
+    .unwrap();
+    let failed = run(
+        data_home.path(),
+        &[
+            "--import",
+            replacement.to_str().unwrap(),
+            "--name",
+            "oxford",
+            "--force",
+        ],
+    );
+
+    assert_eq!(failed.status.code(), Some(3), "{}", text(&failed.stderr));
+    assert!(failed.stdout.is_empty(), "{}", text(&failed.stdout));
+    let stderr = text(&failed.stderr);
+    assert!(stderr.contains("injected sqlite failure"), "{stderr}");
+    assert!(
+        !stderr.contains("already exists"),
+        "force must attempt replacement instead of rejecting the name: {stderr}"
+    );
+    assert_original_dictionary_still_usable(data_home.path());
 }
