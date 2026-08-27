@@ -215,6 +215,35 @@ impl Storage {
             ImportOutcome::Created(entry_count)
         })
     }
+
+    pub fn remove_dictionary(&mut self, name: &DictionaryName) -> Result<(String, u64)> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to start remove transaction")?;
+
+        let existing: Option<(String, u64)> = tx
+            .query_row(
+                "SELECT name, entry_count FROM dictionaries WHERE normalized_name = ?1",
+                [name.normalized()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .with_context(|| format!("failed to look up dictionary '{}'", name.display()))?;
+
+        let Some((original_name, entry_count)) = existing else {
+            bail!("unknown dictionary '{}'", name.display());
+        };
+
+        tx.execute(
+            "DELETE FROM dictionaries WHERE normalized_name = ?1",
+            [name.normalized()],
+        )
+        .with_context(|| format!("failed to remove dictionary '{original_name}'"))?;
+        tx.commit()
+            .with_context(|| format!("failed to commit removal of dictionary '{original_name}'"))?;
+        Ok((original_name, entry_count))
+    }
 }
 
 pub fn database_path() -> Result<PathBuf> {
@@ -902,5 +931,64 @@ mod tests {
         assert_eq!(storage.list_dictionaries().unwrap(), before_list);
         assert_eq!(stored_entries(&storage), before_entries);
         assert_eq!(folded_lookup(&storage, "old"), before_lookup);
+    }
+
+    #[test]
+    fn remove_deletes_the_named_dictionary_and_cascades_entries() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+        import_ok(
+            &mut storage,
+            "Oxford",
+            [entry("hello", "first"), entry("hello", "second")],
+            false,
+        );
+        import_ok(&mut storage, "keep", [entry("safe", "yes")], false);
+
+        let removed = storage
+            .remove_dictionary(&DictionaryName::parse("oxford").unwrap())
+            .unwrap();
+
+        assert_eq!(removed, ("Oxford".into(), 2));
+        assert_eq!(
+            storage.list_dictionaries().unwrap(),
+            vec![("keep".into(), 1)]
+        );
+        assert_eq!(
+            stored_entries(&storage),
+            vec![("safe".into(), "yes".into(), 1)]
+        );
+        assert!(folded_lookup(&storage, "hello").is_empty());
+        assert_eq!(
+            folded_lookup(&storage, "safe"),
+            vec![("keep".into(), "safe".into(), "yes".into())]
+        );
+    }
+
+    #[test]
+    fn remove_unknown_dictionary_does_not_change_rows() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+        import_ok(
+            &mut storage,
+            "Oxford",
+            [entry("hello", "first"), entry("hello", "second")],
+            false,
+        );
+        let before_list = storage.list_dictionaries().unwrap();
+        let before_entries = stored_entries(&storage);
+        let before_lookup = folded_lookup(&storage, "hello");
+
+        let error = storage
+            .remove_dictionary(&DictionaryName::parse("missing").unwrap())
+            .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("unknown dictionary 'missing'"),
+            "{error:#}"
+        );
+        assert_eq!(storage.list_dictionaries().unwrap(), before_list);
+        assert_eq!(stored_entries(&storage), before_entries);
+        assert_eq!(folded_lookup(&storage, "hello"), before_lookup);
     }
 }

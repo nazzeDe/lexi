@@ -121,8 +121,16 @@ fn run(mode: Mode) -> Result<u8, CommandError> {
                 .map_err(CommandError::Runtime)?;
             Ok(EXIT_SUCCESS)
         }
-        Mode::Remove { .. } => Err(CommandError::Runtime(anyhow::anyhow!(
-            "remove mode is not implemented yet"
-        ))),
+        Mode::Remove { name } => {
+            let name = DictionaryName::parse(&name).map_err(CommandError::Argument)?;
+            let mut storage = Storage::open().map_err(CommandError::Runtime)?;
+            let (original_name, count) = storage
+                .remove_dictionary(&name)
+                .map_err(CommandError::Runtime)?;
+            writeln!(stdout, "Removed {original_name}: {count} entries")
+                .context("failed to write remove result to stdout")
+                .map_err(CommandError::Runtime)?;
+            Ok(EXIT_SUCCESS)
+        }
     }
 }

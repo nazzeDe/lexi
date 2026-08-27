@@ -95,17 +95,6 @@ fn invalid_arguments_and_mode_conflicts_exit_two_on_stderr() {
 }
 
 #[test]
-fn remove_mode_parses_but_remains_a_runtime_error() {
-    let data_home = TempDir::new().unwrap();
-    let output = run(data_home.path(), &["--remove", "oxford"]);
-
-    assert_eq!(output.status.code(), Some(3));
-    assert!(output.stdout.is_empty());
-    assert!(text(&output.stderr).contains("not implemented yet"));
-    assert!(!data_home.path().join("lexi/lexi.db").exists());
-}
-
-#[test]
 fn empty_list_bootstraps_the_xdg_database_and_writes_no_output() {
     let data_home = TempDir::new().unwrap();
 
