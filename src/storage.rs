@@ -3,7 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::types::Value;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 
 use crate::record::{DictionaryName, Entry};
 
@@ -11,6 +12,33 @@ pub const SCHEMA_VERSION: i32 = 1;
 
 pub struct Storage {
     connection: Connection,
+}
+
+/// Selected dictionaries for a lookup. An empty caller list means every dictionary.
+#[derive(Debug)]
+pub struct DictionaryScope {
+    ids: Option<Vec<i64>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredEntry {
+    dictionary_name: String,
+    headword: String,
+    definition: String,
+}
+
+impl StoredEntry {
+    pub fn dictionary_name(&self) -> &str {
+        &self.dictionary_name
+    }
+
+    pub fn headword(&self) -> &str {
+        &self.headword
+    }
+
+    pub fn definition(&self) -> &str {
+        &self.definition
+    }
 }
 
 impl Storage {
@@ -62,6 +90,65 @@ impl Storage {
 
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to read dictionary list")
+    }
+
+    pub fn has_any_dictionary(&self) -> Result<bool> {
+        let exists: i64 = self
+            .connection
+            .query_row("SELECT EXISTS(SELECT 1 FROM dictionaries)", [], |row| {
+                row.get(0)
+            })
+            .context("failed to check whether any dictionaries are installed")?;
+        Ok(exists != 0)
+    }
+
+    pub fn resolve_dictionaries(&self, names: &[DictionaryName]) -> Result<DictionaryScope> {
+        if names.is_empty() {
+            return Ok(DictionaryScope { ids: None });
+        }
+
+        let mut ids = Vec::with_capacity(names.len());
+        for name in names {
+            let id: Option<i64> = self
+                .connection
+                .query_row(
+                    "SELECT id FROM dictionaries WHERE normalized_name = ?1",
+                    [name.normalized()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .with_context(|| format!("failed to resolve dictionary '{}'", name.display()))?;
+            match id {
+                Some(id) => ids.push(id),
+                None => bail!("unknown dictionary '{}'", name.display()),
+            }
+        }
+        Ok(DictionaryScope { ids: Some(ids) })
+    }
+
+    pub fn lookup_folded(
+        &self,
+        folded_headword: &str,
+        scope: &DictionaryScope,
+    ) -> Result<Vec<StoredEntry>> {
+        match &scope.ids {
+            None => collect_lookup(
+                &self.connection,
+                &lookup_sql(None),
+                params![folded_headword],
+            ),
+            Some(ids) if ids.is_empty() => Ok(Vec::new()),
+            Some(ids) => {
+                let mut params = Vec::with_capacity(ids.len() + 1);
+                params.push(Value::Text(folded_headword.to_owned()));
+                params.extend(ids.iter().copied().map(Value::Integer));
+                collect_lookup(
+                    &self.connection,
+                    &lookup_sql(Some(ids.len())),
+                    params_from_iter(params),
+                )
+            }
+        }
     }
 
     pub fn import_new_dictionary(
@@ -145,6 +232,48 @@ pub fn database_path() -> Result<PathBuf> {
         }
     };
     Ok(data_home.join("lexi/lexi.db"))
+}
+
+fn lookup_sql(dictionary_count: Option<usize>) -> String {
+    let mut sql = String::from(
+        "SELECT d.name, e.headword, e.definition \
+         FROM entries e \
+         JOIN dictionaries d ON d.id = e.dictionary_id \
+         WHERE e.folded_headword = ?1",
+    );
+    if let Some(count) = dictionary_count {
+        sql.push_str(" AND e.dictionary_id IN (");
+        sql.push_str(
+            &(2..=count + 1)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        sql.push(')');
+    }
+    sql.push_str(" ORDER BY e.id");
+    sql
+}
+
+fn collect_lookup(
+    connection: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> Result<Vec<StoredEntry>> {
+    let mut statement = connection
+        .prepare(sql)
+        .context("failed to prepare entry lookup")?;
+    let rows = statement
+        .query_map(params, |row| {
+            Ok(StoredEntry {
+                dictionary_name: row.get(0)?,
+                headword: row.get(1)?,
+                definition: row.get(2)?,
+            })
+        })
+        .context("failed to look up entries")?;
+    rows.collect::<rusqlite::Result<_>>()
+        .context("failed to read lookup results")
 }
 
 fn initialize_schema(connection: &Connection) -> Result<()> {
@@ -434,5 +563,156 @@ mod tests {
             stored_entries(&storage),
             vec![("safe".into(), "yes".into(), 1)]
         );
+    }
+
+    fn explain_lookup(storage: &Storage, sql: &str, params: impl rusqlite::Params) -> String {
+        let mut statement = storage
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        statement
+            .query_map(params, |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n")
+    }
+
+    fn assert_lookup_uses_index(plan: &str) {
+        assert!(
+            plan.contains("USING INDEX entries_lookup"),
+            "lookup did not use entries_lookup:\n{plan}"
+        );
+        for line in plan.lines() {
+            let lower = line.to_ascii_lowercase();
+            let scans_entries = (lower.contains("scan e") || lower.contains("scan entries"))
+                && !lower.contains("using index");
+            assert!(
+                !scans_entries,
+                "lookup scanned entries without the index:\n{plan}"
+            );
+        }
+    }
+
+    #[test]
+    fn lookup_returns_duplicates_across_dictionaries_in_primary_key_order() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+        storage
+            .import_new_dictionary(
+                &DictionaryName::parse("oxford").unwrap(),
+                [Ok(entry("Hello", "1")), Ok(entry("hello", "2"))],
+            )
+            .unwrap();
+        storage
+            .import_new_dictionary(
+                &DictionaryName::parse("longman").unwrap(),
+                [Ok(entry("HELLO", "3"))],
+            )
+            .unwrap();
+
+        let scope = storage.resolve_dictionaries(&[]).unwrap();
+        let found = storage.lookup_folded("hello", &scope).unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.dictionary_name(),
+                        entry.headword(),
+                        entry.definition(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("oxford", "Hello", "1"),
+                ("oxford", "hello", "2"),
+                ("longman", "HELLO", "3"),
+            ]
+        );
+    }
+
+    #[test]
+    fn lookup_filter_is_case_insensitive_and_does_not_multiply_repeated_names() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+        storage
+            .import_new_dictionary(
+                &DictionaryName::parse("Oxford").unwrap(),
+                [Ok(entry("hello", "oxford"))],
+            )
+            .unwrap();
+        storage
+            .import_new_dictionary(
+                &DictionaryName::parse("longman").unwrap(),
+                [Ok(entry("hello", "longman"))],
+            )
+            .unwrap();
+
+        let names = [
+            DictionaryName::parse("OXFORD").unwrap(),
+            DictionaryName::parse("oxford").unwrap(),
+        ];
+        let scope = storage.resolve_dictionaries(&names).unwrap();
+        let found = storage.lookup_folded("hello", &scope).unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|entry| (entry.dictionary_name(), entry.definition()))
+                .collect::<Vec<_>>(),
+            vec![("Oxford", "oxford")]
+        );
+    }
+
+    #[test]
+    fn resolve_dictionaries_rejects_unknown_names() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+        storage
+            .import_new_dictionary(
+                &DictionaryName::parse("oxford").unwrap(),
+                [Ok(entry("hello", "def"))],
+            )
+            .unwrap();
+
+        let error = storage
+            .resolve_dictionaries(&[DictionaryName::parse("missing").unwrap()])
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("unknown dictionary 'missing'"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn lookup_query_plan_uses_the_folded_headword_index() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+        storage
+            .import_new_dictionary(
+                &DictionaryName::parse("oxford").unwrap(),
+                [Ok(entry("hello", "def"))],
+            )
+            .unwrap();
+        storage
+            .import_new_dictionary(
+                &DictionaryName::parse("longman").unwrap(),
+                [Ok(entry("hello", "other"))],
+            )
+            .unwrap();
+
+        let unfiltered = explain_lookup(
+            &storage,
+            &super::lookup_sql(None),
+            rusqlite::params!["hello"],
+        );
+        assert_lookup_uses_index(&unfiltered);
+
+        let filtered = explain_lookup(
+            &storage,
+            &super::lookup_sql(Some(2)),
+            rusqlite::params!["hello", 1i64, 2i64],
+        );
+        assert_lookup_uses_index(&filtered);
     }
 }

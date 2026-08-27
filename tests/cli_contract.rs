@@ -95,25 +95,14 @@ fn invalid_arguments_and_mode_conflicts_exit_two_on_stderr() {
 }
 
 #[test]
-fn later_business_modes_parse_but_remain_runtime_errors() {
-    let cases = [
-        vec!["hello", "--dictionary", "oxford", "--show-dictionary"],
-        vec!["--remove", "oxford"],
-    ];
+fn remove_mode_parses_but_remains_a_runtime_error() {
+    let data_home = TempDir::new().unwrap();
+    let output = run(data_home.path(), &["--remove", "oxford"]);
 
-    for args in cases {
-        let data_home = TempDir::new().unwrap();
-        let output = run(data_home.path(), &args);
-
-        assert_eq!(
-            output.status.code(),
-            Some(3),
-            "unexpected status for {args:?}"
-        );
-        assert!(output.stdout.is_empty());
-        assert!(text(&output.stderr).contains("not implemented yet"));
-        assert!(!data_home.path().join("lexi/lexi.db").exists());
-    }
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(text(&output.stderr).contains("not implemented yet"));
+    assert!(!data_home.path().join("lexi/lexi.db").exists());
 }
 
 #[test]

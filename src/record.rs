@@ -7,6 +7,33 @@ fn folded_key(value: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryTerm {
+    text: String,
+    folded: String,
+}
+
+impl QueryTerm {
+    pub fn parse(raw: &str) -> Result<Self> {
+        let text = raw.trim();
+        if text.is_empty() {
+            bail!("query headword must not be empty");
+        }
+        Ok(Self {
+            folded: folded_key(text),
+            text: text.to_string(),
+        })
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn folded(&self) -> &str {
+        &self.folded
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DictionaryName {
     display: String,
     normalized: String,
@@ -76,7 +103,17 @@ impl Entry {
 
 #[cfg(test)]
 mod tests {
-    use super::{DictionaryName, Entry};
+    use super::{DictionaryName, Entry, QueryTerm};
+
+    #[test]
+    fn query_term_trims_and_folds_without_other_normalization() {
+        let term = QueryTerm::parse("  Take Off  ").unwrap();
+        assert_eq!(term.text(), "Take Off");
+        assert_eq!(term.folded(), "take off");
+        assert_eq!(QueryTerm::parse("Wörter").unwrap().folded(), "wörter");
+        assert_eq!(QueryTerm::parse("Ｗｏｒｄ").unwrap().text(), "Ｗｏｒｄ");
+        assert!(QueryTerm::parse("   \t  ").is_err());
+    }
 
     #[test]
     fn dictionary_name_trims_and_preserves_display_while_folding_case() {
