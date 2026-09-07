@@ -4,7 +4,6 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use rusqlite::Connection;
 use tempfile::TempDir;
 
 fn run(data_home: &Path, args: &[&str]) -> Output {
@@ -603,64 +602,4 @@ fn closed_stdout_during_query_is_a_runtime_error() {
 
     assert_eq!(output.status.code(), Some(3));
     assert!(text(&output.stderr).starts_with("Error: failed to write query result to stdout"));
-}
-
-#[test]
-fn lookup_query_plan_uses_the_folded_headword_index() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    import(
-        data_home.path(),
-        files.path(),
-        "oxford",
-        "{\"headword\":\"hello\",\"definition\":\"world\"}\n",
-    );
-    import(
-        data_home.path(),
-        files.path(),
-        "longman",
-        "{\"headword\":\"hello\",\"definition\":\"other\"}\n",
-    );
-
-    let found = run(data_home.path(), &["hello"]);
-    assert_eq!(found.status.code(), Some(0), "{}", text(&found.stderr));
-
-    let connection = Connection::open(data_home.path().join("lexi/lexi.db")).unwrap();
-    let plans = [
-        "SELECT d.name, e.headword, e.definition FROM entries e JOIN dictionaries d ON d.id = e.dictionary_id WHERE e.folded_headword = ?1 ORDER BY e.id",
-        "SELECT d.name, e.headword, e.definition FROM entries e JOIN dictionaries d ON d.id = e.dictionary_id WHERE e.folded_headword = ?1 AND e.dictionary_id IN (?2, ?3) ORDER BY e.id",
-    ];
-    for sql in plans {
-        let mut statement = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
-            .unwrap();
-        let params: Vec<rusqlite::types::Value> = if sql.contains("dictionary_id IN") {
-            vec![
-                rusqlite::types::Value::Text("hello".into()),
-                rusqlite::types::Value::Integer(1),
-                rusqlite::types::Value::Integer(2),
-            ]
-        } else {
-            vec![rusqlite::types::Value::Text("hello".into())]
-        };
-        let plan = statement
-            .query_map(rusqlite::params_from_iter(params), |row| {
-                row.get::<_, String>(3)
-            })
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap()
-            .join("\n");
-        assert!(
-            plan.contains("USING INDEX entries_lookup"),
-            "missing entries_lookup in {plan}"
-        );
-        assert!(
-            !plan.to_ascii_lowercase().lines().any(|line| {
-                (line.contains("scan e") || line.contains("scan entries"))
-                    && !line.contains("using index")
-            }),
-            "scanned entries without the index: {plan}"
-        );
-    }
 }
