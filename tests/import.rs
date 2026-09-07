@@ -1,31 +1,14 @@
+mod support;
+
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::path::Path;
 
 use rusqlite::Connection;
-use tempfile::TempDir;
 
-fn run(data_home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_lexi"))
-        .args(args)
-        .env("XDG_DATA_HOME", data_home)
-        .env_remove("HOME")
-        .output()
-        .expect("lexi should run")
-}
+use support::{CliFixture, text};
 
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8(bytes.to_vec()).expect("CLI output should be UTF-8")
-}
-
-fn write_jsonl(directory: &Path, contents: impl AsRef<[u8]>) -> PathBuf {
-    let path = directory.join("sample.jsonl");
-    fs::write(&path, contents).unwrap();
-    path
-}
-
-fn dictionary_rows(data_home: &Path) -> Vec<(String, String, i64)> {
-    Connection::open(data_home.join("lexi/lexi.db"))
+fn dictionary_rows(fixture: &CliFixture) -> Vec<(String, String, i64)> {
+    Connection::open(fixture.database_path())
         .unwrap()
         .prepare("SELECT name, normalized_name, entry_count FROM dictionaries ORDER BY id")
         .unwrap()
@@ -35,8 +18,8 @@ fn dictionary_rows(data_home: &Path) -> Vec<(String, String, i64)> {
         .unwrap()
 }
 
-fn entry_rows(data_home: &Path) -> Vec<(String, String, String, i64)> {
-    Connection::open(data_home.join("lexi/lexi.db"))
+fn entry_rows(fixture: &CliFixture) -> Vec<(String, String, String, i64)> {
+    Connection::open(fixture.database_path())
         .unwrap()
         .prepare("SELECT headword, folded_headword, definition, sequence FROM entries ORDER BY id")
         .unwrap()
@@ -50,29 +33,25 @@ fn entry_rows(data_home: &Path) -> Vec<(String, String, String, i64)> {
 
 #[test]
 fn imports_legal_jsonl_and_prints_the_contract_count() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    let jsonl = write_jsonl(
-        files.path(),
+    let fixture = CliFixture::new();
+    let jsonl = fixture.write_jsonl(
+        "sample.jsonl",
         "{\"headword\":\"hello\",\"definition\":\"interjection\\n1. 你好；您好\"}\n\
          {\"headword\":\"take off\",\"definition\":\"  keep spaces  \"}\n\
          {\"headword\":\"hello\",\"definition\":\"duplicate\"}\n",
     );
 
-    let output = run(
-        data_home.path(),
-        &["--import", jsonl.to_str().unwrap(), "--name", "  Oxford  "],
-    );
+    let output = fixture.run(&["--import", jsonl.to_str().unwrap(), "--name", "  Oxford  "]);
 
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
     assert_eq!(text(&output.stdout), "Imported Oxford: 3 entries\n");
     assert!(output.stderr.is_empty());
     assert_eq!(
-        dictionary_rows(data_home.path()),
+        dictionary_rows(&fixture),
         vec![("Oxford".into(), "oxford".into(), 3)]
     );
     assert_eq!(
-        entry_rows(data_home.path()),
+        entry_rows(&fixture),
         vec![
             (
                 "hello".into(),
@@ -93,102 +72,84 @@ fn imports_legal_jsonl_and_prints_the_contract_count() {
 
 #[test]
 fn first_import_with_force_still_creates_a_new_dictionary() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    let jsonl = write_jsonl(
-        files.path(),
+    let fixture = CliFixture::new();
+    let jsonl = fixture.write_jsonl(
+        "sample.jsonl",
         "{\"headword\":\"a\",\"definition\":\"one\"}\n",
     );
 
-    let output = run(
-        data_home.path(),
-        &[
-            "--import",
-            jsonl.to_str().unwrap(),
-            "--name",
-            "oxford",
-            "--force",
-        ],
-    );
+    let output = fixture.run(&[
+        "--import",
+        jsonl.to_str().unwrap(),
+        "--name",
+        "oxford",
+        "--force",
+    ]);
 
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
     assert_eq!(text(&output.stdout), "Imported oxford: 1 entries\n");
     assert!(output.stderr.is_empty());
     assert_eq!(
-        dictionary_rows(data_home.path()),
+        dictionary_rows(&fixture),
         vec![("oxford".into(), "oxford".into(), 1)]
     );
     assert_eq!(
-        entry_rows(data_home.path()),
+        entry_rows(&fixture),
         vec![("a".into(), "a".into(), "one".into(), 1)]
     );
-    let query = run(data_home.path(), &["a"]);
+    let query = fixture.run(&["a"]);
     assert_eq!(query.status.code(), Some(0), "{}", text(&query.stderr));
     assert_eq!(text(&query.stdout), "a\none\n");
 }
 
 #[test]
 fn force_replaces_only_the_matching_dictionary_and_prints_replaced() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    let original = write_jsonl(
-        files.path(),
+    let fixture = CliFixture::new();
+    let original = fixture.write_jsonl(
+        "sample.jsonl",
         "{\"headword\":\"old\",\"definition\":\"keep me\"}\n\
          {\"headword\":\"old\",\"definition\":\"second\"}\n",
     );
-    let first = run(
-        data_home.path(),
-        &["--import", original.to_str().unwrap(), "--name", "oxford"],
-    );
+    let first = fixture.run(&["--import", original.to_str().unwrap(), "--name", "oxford"]);
     assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
 
-    let neighbor = files.path().join("longman.jsonl");
-    fs::write(
-        &neighbor,
+    let neighbor = fixture.write_jsonl(
+        "longman.jsonl",
         "{\"headword\":\"old\",\"definition\":\"other dict\"}\n",
-    )
-    .unwrap();
-    let kept = run(
-        data_home.path(),
-        &["--import", neighbor.to_str().unwrap(), "--name", "longman"],
     );
+    let kept = fixture.run(&["--import", neighbor.to_str().unwrap(), "--name", "longman"]);
     assert_eq!(kept.status.code(), Some(0), "{}", text(&kept.stderr));
 
-    let replacement = files.path().join("new.jsonl");
-    fs::write(
-        &replacement,
+    let replacement = fixture.write_jsonl(
+        "new.jsonl",
         "{\"headword\":\"hello\",\"definition\":\"new one\"}\n\
          {\"headword\":\"hello\",\"definition\":\"new two\"}\n\
          {\"headword\":\"world\",\"definition\":\"three\"}\n",
-    )
-    .unwrap();
-    let output = run(
-        data_home.path(),
-        &[
-            "--import",
-            replacement.to_str().unwrap(),
-            "--name",
-            "oxford",
-            "--force",
-        ],
     );
+    let output = fixture.run(&[
+        "--import",
+        replacement.to_str().unwrap(),
+        "--name",
+        "oxford",
+        "--force",
+    ]);
 
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
     assert_eq!(text(&output.stdout), "Replaced oxford: 3 entries\n");
     assert!(output.stderr.is_empty());
     assert_eq!(
-        text(&run(data_home.path(), &["--list"]).stdout),
+        text(&fixture.run(&["--list"]).stdout),
         "oxford\t3\nlongman\t1\n",
     );
     assert_eq!(
-        dictionary_rows(data_home.path()),
+        dictionary_rows(&fixture),
         vec![
             ("oxford".into(), "oxford".into(), 3),
             ("longman".into(), "longman".into(), 1),
         ]
     );
     assert_eq!(
-        entry_rows(data_home.path()),
+        entry_rows(&fixture),
         vec![
             ("old".into(), "old".into(), "other dict".into(), 1),
             ("hello".into(), "hello".into(), "new one".into(), 1),
@@ -197,13 +158,10 @@ fn force_replaces_only_the_matching_dictionary_and_prints_replaced() {
         ]
     );
 
-    let missed = run(data_home.path(), &["old", "--dictionary", "oxford"]);
+    let missed = fixture.run(&["old", "--dictionary", "oxford"]);
     assert_eq!(missed.status.code(), Some(1), "{}", text(&missed.stderr));
     assert!(text(&missed.stderr).contains("No entry found for: old"));
-    let found = run(
-        data_home.path(),
-        &["hello", "--dictionary", "oxford", "--show-dictionary"],
-    );
+    let found = fixture.run(&["hello", "--dictionary", "oxford", "--show-dictionary"]);
     assert_eq!(found.status.code(), Some(0), "{}", text(&found.stderr));
     assert_eq!(
         text(&found.stdout),
@@ -213,73 +171,57 @@ fn force_replaces_only_the_matching_dictionary_and_prints_replaced() {
 
 #[test]
 fn force_replaces_a_case_insensitive_name_match() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    let original = write_jsonl(
-        files.path(),
+    let fixture = CliFixture::new();
+    let original = fixture.write_jsonl(
+        "sample.jsonl",
         "{\"headword\":\"Hello\",\"definition\":\"old Oxford\"}\n",
     );
-    let first = run(
-        data_home.path(),
-        &["--import", original.to_str().unwrap(), "--name", "Oxford"],
-    );
+    let first = fixture.run(&["--import", original.to_str().unwrap(), "--name", "Oxford"]);
     assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
 
-    let replacement = files.path().join("new.jsonl");
-    fs::write(
-        &replacement,
+    let replacement = fixture.write_jsonl(
+        "new.jsonl",
         "{\"headword\":\"hello\",\"definition\":\"new oxford\"}\n",
-    )
-    .unwrap();
-    let output = run(
-        data_home.path(),
-        &[
-            "--import",
-            replacement.to_str().unwrap(),
-            "--name",
-            "oxford",
-            "--force",
-        ],
     );
+    let output = fixture.run(&[
+        "--import",
+        replacement.to_str().unwrap(),
+        "--name",
+        "oxford",
+        "--force",
+    ]);
 
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
     assert_eq!(text(&output.stdout), "Replaced oxford: 1 entries\n");
+    assert_eq!(text(&fixture.run(&["--list"]).stdout), "oxford\t1\n");
     assert_eq!(
-        text(&run(data_home.path(), &["--list"]).stdout),
-        "oxford\t1\n",
-    );
-    assert_eq!(
-        dictionary_rows(data_home.path()),
+        dictionary_rows(&fixture),
         vec![("oxford".into(), "oxford".into(), 1)]
     );
     assert_eq!(
-        entry_rows(data_home.path()),
+        entry_rows(&fixture),
         vec![("hello".into(), "hello".into(), "new oxford".into(), 1)]
     );
-    let found = run(data_home.path(), &["hello", "--show-dictionary"]);
+    let found = fixture.run(&["hello", "--show-dictionary"]);
     assert_eq!(found.status.code(), Some(0), "{}", text(&found.stderr));
     assert_eq!(text(&found.stdout), "[oxford] hello\nnew oxford\n");
 }
 
 #[test]
 fn accepts_bom_crlf_and_blank_lines() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
+    let fixture = CliFixture::new();
     let mut contents = b"\xEF\xBB\xBF".to_vec();
     contents.extend_from_slice(
         b"{\"headword\":\"a\",\"definition\":\"one\"}\r\n \t \r\n\n{\"headword\":\"b\",\"definition\":\"two\"}\r\n",
     );
-    let jsonl = write_jsonl(files.path(), contents);
+    let jsonl = fixture.write_jsonl("sample.jsonl", contents);
 
-    let output = run(
-        data_home.path(),
-        &["--import", jsonl.to_str().unwrap(), "--name", "oxford"],
-    );
+    let output = fixture.run(&["--import", jsonl.to_str().unwrap(), "--name", "oxford"]);
 
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
     assert_eq!(text(&output.stdout), "Imported oxford: 2 entries\n");
     assert_eq!(
-        entry_rows(data_home.path())
+        entry_rows(&fixture)
             .into_iter()
             .map(|(headword, _, definition, sequence)| (headword, definition, sequence))
             .collect::<Vec<_>>(),
@@ -334,13 +276,9 @@ fn validation_failures_include_path_and_line_and_exit_three() {
     ];
 
     for (contents, line, reason) in cases {
-        let data_home = TempDir::new().unwrap();
-        let files = TempDir::new().unwrap();
-        let jsonl = write_jsonl(files.path(), *contents);
-        let output = run(
-            data_home.path(),
-            &["--import", jsonl.to_str().unwrap(), "--name", "oxford"],
-        );
+        let fixture = CliFixture::new();
+        let jsonl = fixture.write_jsonl("sample.jsonl", *contents);
+        let output = fixture.run(&["--import", jsonl.to_str().unwrap(), "--name", "oxford"]);
 
         assert_eq!(output.status.code(), Some(3), "{}", text(&output.stderr));
         assert!(output.stdout.is_empty(), "{}", text(&output.stdout));
@@ -349,94 +287,68 @@ fn validation_failures_include_path_and_line_and_exit_three() {
         assert!(stderr.contains(&jsonl.display().to_string()), "{stderr}");
         assert!(stderr.contains(line), "{stderr}");
         assert!(stderr.contains(reason), "{stderr}");
-        if data_home.path().join("lexi/lexi.db").exists() {
-            assert!(dictionary_rows(data_home.path()).is_empty());
-            assert!(entry_rows(data_home.path()).is_empty());
+        if fixture.database_path().exists() {
+            assert!(dictionary_rows(&fixture).is_empty());
+            assert!(entry_rows(&fixture).is_empty());
         }
     }
 }
 
 #[test]
 fn same_name_different_case_is_rejected_without_changing_the_original() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    let jsonl = write_jsonl(
-        files.path(),
+    let fixture = CliFixture::new();
+    let jsonl = fixture.write_jsonl(
+        "sample.jsonl",
         "{\"headword\":\"a\",\"definition\":\"one\"}\n{\"headword\":\"b\",\"definition\":\"two\"}\n",
     );
-    let first = run(
-        data_home.path(),
-        &["--import", jsonl.to_str().unwrap(), "--name", "Oxford"],
-    );
+    let first = fixture.run(&["--import", jsonl.to_str().unwrap(), "--name", "Oxford"]);
     assert_eq!(first.status.code(), Some(0), "{}", text(&first.stderr));
 
-    let second = run(
-        data_home.path(),
-        &["--import", jsonl.to_str().unwrap(), "--name", "oxford"],
-    );
+    let second = fixture.run(&["--import", jsonl.to_str().unwrap(), "--name", "oxford"]);
 
     assert_eq!(second.status.code(), Some(3), "{}", text(&second.stderr));
     assert!(second.stdout.is_empty());
     assert!(text(&second.stderr).contains("dictionary 'Oxford' already exists"));
+    assert_eq!(text(&fixture.run(&["--list"]).stdout), "Oxford\t2\n");
     assert_eq!(
-        text(&run(data_home.path(), &["--list"]).stdout),
-        "Oxford\t2\n"
-    );
-    assert_eq!(
-        dictionary_rows(data_home.path()),
+        dictionary_rows(&fixture),
         vec![("Oxford".into(), "oxford".into(), 2)]
     );
 }
 
 #[test]
 fn failed_import_does_not_leave_a_partial_new_dictionary() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    let good = write_jsonl(
-        files.path(),
+    let fixture = CliFixture::new();
+    let good = fixture.write_jsonl(
+        "sample.jsonl",
         "{\"headword\":\"keep\",\"definition\":\"safe\"}\n",
     );
-    let kept = run(
-        data_home.path(),
-        &["--import", good.to_str().unwrap(), "--name", "keep"],
-    );
+    let kept = fixture.run(&["--import", good.to_str().unwrap(), "--name", "keep"]);
     assert_eq!(kept.status.code(), Some(0), "{}", text(&kept.stderr));
 
-    let bad_path = files.path().join("doomed.jsonl");
-    fs::write(
-        &bad_path,
+    let bad_path = fixture.write_jsonl(
+        "doomed.jsonl",
         "{\"headword\":\"one\",\"definition\":\"1\"}\n{\"headword\":\"\",\"definition\":\"no\"}\n",
-    )
-    .unwrap();
-    let failed = run(
-        data_home.path(),
-        &["--import", bad_path.to_str().unwrap(), "--name", "doomed"],
     );
+    let failed = fixture.run(&["--import", bad_path.to_str().unwrap(), "--name", "doomed"]);
 
     assert_eq!(failed.status.code(), Some(3), "{}", text(&failed.stderr));
     assert!(text(&failed.stderr).contains("at line 2"));
+    assert_eq!(text(&fixture.run(&["--list"]).stdout), "keep\t1\n");
     assert_eq!(
-        text(&run(data_home.path(), &["--list"]).stdout),
-        "keep\t1\n"
-    );
-    assert_eq!(
-        entry_rows(data_home.path()),
+        entry_rows(&fixture),
         vec![("keep".into(), "keep".into(), "safe".into(), 1)]
     );
 }
 
 #[test]
 fn deleting_the_source_jsonl_does_not_affect_persisted_data() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    let jsonl = write_jsonl(
-        files.path(),
+    let fixture = CliFixture::new();
+    let jsonl = fixture.write_jsonl(
+        "sample.jsonl",
         "{\"headword\":\"hello\",\"definition\":\"world\"}\n",
     );
-    let imported = run(
-        data_home.path(),
-        &["--import", jsonl.to_str().unwrap(), "--name", "oxford"],
-    );
+    let imported = fixture.run(&["--import", jsonl.to_str().unwrap(), "--name", "oxford"]);
     assert_eq!(
         imported.status.code(),
         Some(0),
@@ -445,75 +357,68 @@ fn deleting_the_source_jsonl_does_not_affect_persisted_data() {
     );
     fs::remove_file(&jsonl).unwrap();
 
-    let list = run(data_home.path(), &["--list"]);
+    let list = fixture.run(&["--list"]);
     assert_eq!(list.status.code(), Some(0), "{}", text(&list.stderr));
     assert_eq!(text(&list.stdout), "oxford\t1\n");
     assert_eq!(
-        entry_rows(data_home.path()),
+        entry_rows(&fixture),
         vec![("hello".into(), "hello".into(), "world".into(), 1)]
     );
 }
 
 #[test]
 fn missing_jsonl_is_a_runtime_error() {
-    let data_home = TempDir::new().unwrap();
-    let missing = data_home.path().join("missing.jsonl");
-    let output = run(
-        data_home.path(),
-        &["--import", missing.to_str().unwrap(), "--name", "oxford"],
-    );
+    let fixture = CliFixture::new();
+    let missing = fixture.data_home().join("missing.jsonl");
+    let output = fixture.run(&["--import", missing.to_str().unwrap(), "--name", "oxford"]);
 
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
     assert!(text(&output.stderr).contains("failed to open JSONL file"));
     assert!(text(&output.stderr).contains(&missing.display().to_string()));
-    assert!(!data_home.path().join("lexi/lexi.db").exists());
+    assert!(!fixture.database_path().exists());
 }
 
-fn import_named(data_home: &Path, jsonl: &Path, name: &str) {
-    let output = run(
-        data_home,
-        &["--import", jsonl.to_str().unwrap(), "--name", name],
-    );
+fn import_named(fixture: &CliFixture, jsonl: &Path, name: &str) {
+    let output = fixture.run(&["--import", jsonl.to_str().unwrap(), "--name", name]);
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
 }
 
-fn seed_oxford_and_keep(data_home: &Path, files: &Path) {
-    let oxford = write_jsonl(
-        files,
+fn seed_oxford_and_keep(fixture: &CliFixture) {
+    let oxford = fixture.write_jsonl(
+        "sample.jsonl",
         "{\"headword\":\"old\",\"definition\":\"first\"}\n\
          {\"headword\":\"old\",\"definition\":\"second\"}\n",
     );
-    import_named(data_home, &oxford, "Oxford");
-    let keep = files.join("keep.jsonl");
-    fs::write(&keep, "{\"headword\":\"safe\",\"definition\":\"yes\"}\n").unwrap();
-    import_named(data_home, &keep, "keep");
+    import_named(fixture, &oxford, "Oxford");
+    let keep = fixture.write_jsonl(
+        "keep.jsonl",
+        "{\"headword\":\"safe\",\"definition\":\"yes\"}\n",
+    );
+    import_named(fixture, &keep, "keep");
 }
 
-fn assert_original_dictionary_still_usable(data_home: &Path) {
+fn assert_original_dictionary_still_usable(fixture: &CliFixture) {
     assert_eq!(
-        text(&run(data_home, &["--list"]).stdout),
+        text(&fixture.run(&["--list"]).stdout),
         "Oxford\t2\nkeep\t1\n",
     );
     assert_eq!(
-        dictionary_rows(data_home),
+        dictionary_rows(fixture),
         vec![
             ("Oxford".into(), "oxford".into(), 2),
             ("keep".into(), "keep".into(), 1),
         ]
     );
     assert_eq!(
-        entry_rows(data_home),
+        entry_rows(fixture),
         vec![
             ("old".into(), "old".into(), "first".into(), 1),
             ("old".into(), "old".into(), "second".into(), 2),
             ("safe".into(), "safe".into(), "yes".into(), 1),
         ]
     );
-    let query = run(
-        data_home,
-        &["old", "--dictionary", "Oxford", "--show-dictionary"],
-    );
+    let query = fixture.run(&["old", "--dictionary", "Oxford", "--show-dictionary"]);
     assert_eq!(query.status.code(), Some(0), "{}", text(&query.stderr));
     assert_eq!(
         text(&query.stdout),
@@ -523,26 +428,20 @@ fn assert_original_dictionary_still_usable(data_home: &Path) {
 
 #[test]
 fn jsonl_failure_during_force_replace_leaves_the_old_dictionary_usable() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    seed_oxford_and_keep(data_home.path(), files.path());
+    let fixture = CliFixture::new();
+    seed_oxford_and_keep(&fixture);
 
-    let bad = files.path().join("doomed.jsonl");
-    fs::write(
-        &bad,
+    let bad = fixture.write_jsonl(
+        "doomed.jsonl",
         "{\"headword\":\"one\",\"definition\":\"1\"}\n{\"headword\":\"\",\"definition\":\"no\"}\n",
-    )
-    .unwrap();
-    let failed = run(
-        data_home.path(),
-        &[
-            "--import",
-            bad.to_str().unwrap(),
-            "--name",
-            "oxford",
-            "--force",
-        ],
     );
+    let failed = fixture.run(&[
+        "--import",
+        bad.to_str().unwrap(),
+        "--name",
+        "oxford",
+        "--force",
+    ]);
 
     assert_eq!(failed.status.code(), Some(3), "{}", text(&failed.stderr));
     assert!(failed.stdout.is_empty(), "{}", text(&failed.stdout));
@@ -553,29 +452,24 @@ fn jsonl_failure_during_force_replace_leaves_the_old_dictionary_usable() {
         !stderr.contains("already exists"),
         "force must attempt replacement instead of rejecting the name: {stderr}"
     );
-    assert_original_dictionary_still_usable(data_home.path());
+    assert_original_dictionary_still_usable(&fixture);
 }
 
 #[test]
 fn io_failure_during_force_replace_leaves_the_old_dictionary_usable() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    seed_oxford_and_keep(data_home.path(), files.path());
+    let fixture = CliFixture::new();
+    seed_oxford_and_keep(&fixture);
 
     let mut contents = b"{\"headword\":\"one\",\"definition\":\"1\"}\n".to_vec();
     contents.extend_from_slice(b"\xff\n");
-    let bad = files.path().join("broken.jsonl");
-    fs::write(&bad, contents).unwrap();
-    let failed = run(
-        data_home.path(),
-        &[
-            "--import",
-            bad.to_str().unwrap(),
-            "--name",
-            "oxford",
-            "--force",
-        ],
-    );
+    let bad = fixture.write_jsonl("broken.jsonl", contents);
+    let failed = fixture.run(&[
+        "--import",
+        bad.to_str().unwrap(),
+        "--name",
+        "oxford",
+        "--force",
+    ]);
 
     assert_eq!(failed.status.code(), Some(3), "{}", text(&failed.stderr));
     assert!(failed.stdout.is_empty(), "{}", text(&failed.stdout));
@@ -586,16 +480,15 @@ fn io_failure_during_force_replace_leaves_the_old_dictionary_usable() {
         !stderr.contains("already exists"),
         "force must attempt replacement instead of rejecting the name: {stderr}"
     );
-    assert_original_dictionary_still_usable(data_home.path());
+    assert_original_dictionary_still_usable(&fixture);
 }
 
 #[test]
 fn sqlite_failure_during_force_replace_leaves_the_old_dictionary_usable() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    seed_oxford_and_keep(data_home.path(), files.path());
+    let fixture = CliFixture::new();
+    seed_oxford_and_keep(&fixture);
 
-    Connection::open(data_home.path().join("lexi/lexi.db"))
+    Connection::open(fixture.database_path())
         .unwrap()
         .execute_batch(
             "CREATE TRIGGER fail_replace BEFORE INSERT ON entries
@@ -605,22 +498,17 @@ fn sqlite_failure_during_force_replace_leaves_the_old_dictionary_usable() {
         )
         .unwrap();
 
-    let replacement = files.path().join("new.jsonl");
-    fs::write(
-        &replacement,
+    let replacement = fixture.write_jsonl(
+        "new.jsonl",
         "{\"headword\":\"hello\",\"definition\":\"new\"}\n",
-    )
-    .unwrap();
-    let failed = run(
-        data_home.path(),
-        &[
-            "--import",
-            replacement.to_str().unwrap(),
-            "--name",
-            "oxford",
-            "--force",
-        ],
     );
+    let failed = fixture.run(&[
+        "--import",
+        replacement.to_str().unwrap(),
+        "--name",
+        "oxford",
+        "--force",
+    ]);
 
     assert_eq!(failed.status.code(), Some(3), "{}", text(&failed.stderr));
     assert!(failed.stdout.is_empty(), "{}", text(&failed.stdout));
@@ -630,5 +518,5 @@ fn sqlite_failure_during_force_replace_leaves_the_old_dictionary_usable() {
         !stderr.contains("already exists"),
         "force must attempt replacement instead of rejecting the name: {stderr}"
     );
-    assert_original_dictionary_still_usable(data_home.path());
+    assert_original_dictionary_still_usable(&fixture);
 }

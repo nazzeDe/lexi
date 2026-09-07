@@ -2,7 +2,7 @@
 
 ## 状态
 
-Ready
+Completed
 
 ## 目的
 
@@ -177,19 +177,19 @@ interface 约束：
 
 ## Acceptance
 
-- [ ] `tests/support/mod.rs` 存在且 `CliFixture` 只有 `data_home`、`files` 两个私有字段。
-- [ ] `CliFixture` 和共享函数的 interface 与本 ticket 代码块一致。
-- [ ] 六个集成测试文件都声明 `mod support;` 并实际使用 support 项。
-- [ ] 六个文件中不再定义重复的通用 `run` 或 `text`。
-- [ ] `closed_output` 只定义在 support，查询和 CLI 合同写失败测试仍通过。
-- [ ] JSONL 通用文件写入只定义在 support，各调用方显式传文件名。
-- [ ] support 中没有 `assert!`、`assert_eq!`、退出码判断、输出内容判断、SQLite 查询或带成功语义的导入 helper。
-- [ ] 各文件原有 SQLite tuple 查询仍留在原文件，没有被统一成共享 tuple。
-- [ ] PTY 分配、窗口尺寸、raw 属性和读循环仍在 `output_terminal.rs`。
-- [ ] 测试继续使用真实二进制、临时 JSONL、临时 XDG 和真实 SQLite。
-- [ ] clippy dead-code 规则已按实际诊断执行，最终 clippy 无警告。
-- [ ] 六个集成测试目标全部通过。
-- [ ] 没有生产代码、README 或 Cargo 文件变更。
+- [x] `tests/support/mod.rs` 存在且 `CliFixture` 只有 `data_home`、`files` 两个私有字段。证据：`tests/support/mod.rs` 字段仅这两项且私有。
+- [x] `CliFixture` 和共享函数的 interface 与本 ticket 代码块一致。证据：`new`/`data_home`/`files`/`database_path`/`command`/`run`/`write_jsonl`/`text`/`closed_output` 签名与约束一致。
+- [x] 六个集成测试文件都声明 `mod support;` 并实际使用 support 项。证据：`rg -n "^mod support;$"` 六文件各命中一次。
+- [x] 六个文件中不再定义重复的通用 `run` 或 `text`。证据：第二条 `rg` 退出码 1。
+- [x] `closed_output` 只定义在 support，查询和 CLI 合同写失败测试仍通过。证据：`cli_contract` 9 passed、`query` 22 passed，含 closed stdout/stderr。
+- [x] JSONL 通用文件写入只定义在 support，各调用方显式传文件名。证据：第二条 `rg` 无 `fn write_jsonl(`；调用方传入 `sample.jsonl`/`{name}.jsonl` 等。
+- [x] support 中没有 `assert!`、`assert_eq!`、退出码判断、输出内容判断、SQLite 查询或带成功语义的导入 helper。证据：第三条 `rg` 退出码 1。
+- [x] 各文件原有 SQLite tuple 查询仍留在原文件，没有被统一成共享 tuple。证据：`import.rs` 仍为四元组 entries，`list_remove.rs` 仍为三元组 entries。
+- [x] PTY 分配、窗口尺寸、raw 属性和读循环仍在 `output_terminal.rs`。证据：`openpt`/`grantpt`/`unlockpt`/`tcsetwinsize`/`make_raw` 仅该文件；support 无匹配。
+- [x] 测试继续使用真实二进制、临时 JSONL、临时 XDG 和真实 SQLite。证据：`command()` 使用 `CARGO_BIN_EXE_lexi` 并设置绝对 `XDG_DATA_HOME`、移除 `HOME`；`write_jsonl` 写临时 files；SQLite 仍由各测试打开 `database_path()`。
+- [x] clippy dead-code 规则已按实际诊断执行，最终 clippy 无警告。证据：首次无 allow 的 `cargo clippy --all-targets -- -D warnings` 报告 support public item `dead_code`（`files`/`write_jsonl`/`database_path`/`run`/`closed_output`）；随后加入模块级 `#![allow(dead_code, reason = "共享 support 在各集成测试 crate 中只使用其 interface 子集")]` 并复跑同一 clippy 通过。
+- [x] 六个集成测试目标全部通过。证据：cli_contract 9、import 13、list_remove 5、query 22、release_readiness 7、output_terminal 1；`cargo test` 112 passed。
+- [x] 没有生产代码、README 或 Cargo 文件变更。证据：工作区仅 `M` 六个测试文件与未跟踪 `tests/support/`，外加本 ticket/spec 勾选。
 
 ## Validation
 

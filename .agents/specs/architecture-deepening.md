@@ -148,7 +148,7 @@ main.rs
 
 - [ ] 严格按 `03 -> 04 -> 02 -> 01` 完成，02 与 01 未并行修改 `query.rs`。
 - [x] `tests/query.rs` 不再复制 lookup SQL 或执行查询计划，`storage.rs` 仍证明两种 SQL 使用 `entries_lookup` 且不全表扫描 entries。证据：Ticket 03 Validation；`rg` 对 `tests/query.rs` 退出码 1；storage 查询计划测试通过。
-- [ ] 六个集成测试均声明 `mod support;` 并使用 `CliFixture`/共享函数；测试行为断言和专属 SQLite tuple 查询仍在各自文件；`output_terminal.rs` 的 PTY 细节仍本地。
+- [x] 六个集成测试均声明 `mod support;` 并使用 `CliFixture`/共享函数；测试行为断言和专属 SQLite tuple 查询仍在各自文件；`output_terminal.rs` 的 PTY 细节仍本地。证据：Ticket 04 Validation；`rg "^mod support;$"` 六文件各一次；support 负向 `rg` 退出码 1；PTY helper 仍在 `output_terminal.rs`。
 - [ ] `Storage::lookup` 一次完成空库预检和整批词典 scope 解析；`Lookup::find` 隐藏 folded mechanics 并执行全局原词头精确匹配优先。
 - [ ] `query.rs` 不再可见 `DictionaryScope`、`has_any_dictionary`、`resolve_dictionaries`、`lookup_folded` 或 `select_matches`。
 - [ ] `QueryOutput` 精确持有两个 writer、一份 `Options` 和 `wrote_record`；公开 interface 为 `new`/`records`/`miss`；只有单条 record 完整成功后更新状态，`miss` 不更新状态。

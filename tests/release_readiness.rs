@@ -1,21 +1,10 @@
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 
-use tempfile::TempDir;
-
-fn run(data_home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_lexi"))
-        .args(args)
-        .env("XDG_DATA_HOME", data_home)
-        .env_remove("HOME")
-        .output()
-        .expect("lexi should run")
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8(bytes.to_vec()).expect("CLI output should be UTF-8")
-}
+use support::{CliFixture, text};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -172,19 +161,13 @@ fn sources_and_tests_do_not_reference_user_dictionary_sources() {
 
 #[test]
 fn temporary_xdg_end_to_end_import_list_query_and_remove() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    let jsonl = files.path().join("sample.jsonl");
-    fs::write(
-        &jsonl,
+    let fixture = CliFixture::new();
+    let jsonl = fixture.write_jsonl(
+        "sample.jsonl",
         "{\"headword\":\"hello\",\"definition\":\"interjection\\n1. 你好；您好\"}\n",
-    )
-    .unwrap();
-
-    let imported = run(
-        data_home.path(),
-        &["--import", jsonl.to_str().unwrap(), "--name", "oxford"],
     );
+
+    let imported = fixture.run(&["--import", jsonl.to_str().unwrap(), "--name", "oxford"]);
     assert_eq!(
         imported.status.code(),
         Some(0),
@@ -194,17 +177,17 @@ fn temporary_xdg_end_to_end_import_list_query_and_remove() {
     assert_eq!(text(&imported.stdout), "Imported oxford: 1 entries\n");
     assert!(imported.stderr.is_empty());
 
-    let list = run(data_home.path(), &["--list"]);
+    let list = fixture.run(&["--list"]);
     assert_eq!(list.status.code(), Some(0), "{}", text(&list.stderr));
     assert_eq!(text(&list.stdout), "oxford\t1\n");
     assert!(list.stderr.is_empty());
 
-    let query = run(data_home.path(), &["hello"]);
+    let query = fixture.run(&["hello"]);
     assert_eq!(query.status.code(), Some(0), "{}", text(&query.stderr));
     assert_eq!(text(&query.stdout), "hello\ninterjection\n1. 你好；您好\n");
     assert!(query.stderr.is_empty());
 
-    let shown = run(data_home.path(), &["hello", "--show-dictionary"]);
+    let shown = fixture.run(&["hello", "--show-dictionary"]);
     assert_eq!(shown.status.code(), Some(0), "{}", text(&shown.stderr));
     assert_eq!(
         text(&shown.stdout),
@@ -212,12 +195,12 @@ fn temporary_xdg_end_to_end_import_list_query_and_remove() {
     );
     assert!(shown.stderr.is_empty());
 
-    let removed = run(data_home.path(), &["--remove", "oxford"]);
+    let removed = fixture.run(&["--remove", "oxford"]);
     assert_eq!(removed.status.code(), Some(0), "{}", text(&removed.stderr));
     assert_eq!(text(&removed.stdout), "Removed oxford: 1 entries\n");
     assert!(removed.stderr.is_empty());
 
-    let empty = run(data_home.path(), &["--list"]);
+    let empty = fixture.run(&["--list"]);
     assert_eq!(empty.status.code(), Some(0), "{}", text(&empty.stderr));
     assert!(empty.stdout.is_empty());
     assert!(empty.stderr.is_empty());
@@ -225,18 +208,12 @@ fn temporary_xdg_end_to_end_import_list_query_and_remove() {
 
 #[test]
 fn moving_the_source_jsonl_still_allows_query() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    let jsonl = files.path().join("sample.jsonl");
-    fs::write(
-        &jsonl,
+    let fixture = CliFixture::new();
+    let jsonl = fixture.write_jsonl(
+        "sample.jsonl",
         "{\"headword\":\"hello\",\"definition\":\"world\"}\n",
-    )
-    .unwrap();
-    let imported = run(
-        data_home.path(),
-        &["--import", jsonl.to_str().unwrap(), "--name", "oxford"],
     );
+    let imported = fixture.run(&["--import", jsonl.to_str().unwrap(), "--name", "oxford"]);
     assert_eq!(
         imported.status.code(),
         Some(0),
@@ -244,34 +221,28 @@ fn moving_the_source_jsonl_still_allows_query() {
         text(&imported.stderr)
     );
 
-    let moved = files.path().join("elsewhere").join("sample.jsonl");
+    let moved = fixture.files().join("elsewhere").join("sample.jsonl");
     fs::create_dir_all(moved.parent().unwrap()).unwrap();
     fs::rename(&jsonl, &moved).unwrap();
     assert!(!jsonl.exists());
 
-    let output = run(data_home.path(), &["hello"]);
+    let output = fixture.run(&["hello"]);
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
     assert_eq!(text(&output.stdout), "hello\nworld\n");
 }
 
 #[test]
 fn exit_codes_cover_success_miss_argument_and_runtime() {
-    let data_home = TempDir::new().unwrap();
-    let files = TempDir::new().unwrap();
-    let jsonl = files.path().join("sample.jsonl");
-    fs::write(
-        &jsonl,
+    let fixture = CliFixture::new();
+    let jsonl = fixture.write_jsonl(
+        "sample.jsonl",
         "{\"headword\":\"hello\",\"definition\":\"world\"}\n",
-    )
-    .unwrap();
+    );
 
-    let help = run(data_home.path(), &["--help"]);
+    let help = fixture.run(&["--help"]);
     assert_eq!(help.status.code(), Some(0), "{}", text(&help.stderr));
 
-    let imported = run(
-        data_home.path(),
-        &["--import", jsonl.to_str().unwrap(), "--name", "oxford"],
-    );
+    let imported = fixture.run(&["--import", jsonl.to_str().unwrap(), "--name", "oxford"]);
     assert_eq!(
         imported.status.code(),
         Some(0),
@@ -279,11 +250,11 @@ fn exit_codes_cover_success_miss_argument_and_runtime() {
         text(&imported.stderr)
     );
 
-    let miss = run(data_home.path(), &["helo"]);
+    let miss = fixture.run(&["helo"]);
     assert_eq!(miss.status.code(), Some(1), "{}", text(&miss.stderr));
     assert_eq!(text(&miss.stderr), "No entry found for: helo\n");
 
-    let conflict = run(data_home.path(), &["hello", "--list"]);
+    let conflict = fixture.run(&["hello", "--list"]);
     assert_eq!(
         conflict.status.code(),
         Some(2),
@@ -292,7 +263,7 @@ fn exit_codes_cover_success_miss_argument_and_runtime() {
     );
     assert!(conflict.stdout.is_empty());
 
-    let runtime = run(data_home.path(), &["--remove", "missing"]);
+    let runtime = fixture.run(&["--remove", "missing"]);
     assert_eq!(runtime.status.code(), Some(3), "{}", text(&runtime.stderr));
     assert!(runtime.stdout.is_empty());
     assert!(text(&runtime.stderr).contains("unknown dictionary 'missing'"));

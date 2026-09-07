@@ -1,36 +1,18 @@
-use std::os::fd::OwnedFd;
-use std::os::unix::net::UnixStream;
-use std::path::Path;
-use std::process::{Command, Output, Stdio};
+mod support;
+
+use std::process::Command;
 
 use rusqlite::Connection;
 use tempfile::TempDir;
 
-fn run(data_home: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_lexi"))
-        .args(args)
-        .env("XDG_DATA_HOME", data_home)
-        .env_remove("HOME")
-        .output()
-        .expect("lexi should run")
-}
-
-fn text(bytes: &[u8]) -> String {
-    String::from_utf8(bytes.to_vec()).expect("CLI output should be UTF-8")
-}
-
-fn closed_output() -> Stdio {
-    let (reader, writer) = UnixStream::pair().unwrap();
-    drop(reader);
-    Stdio::from(OwnedFd::from(writer))
-}
+use support::{CliFixture, closed_output, text};
 
 #[test]
 fn no_arguments_matches_long_help_without_opening_the_database() {
-    let data_home = TempDir::new().unwrap();
+    let fixture = CliFixture::new();
 
-    let no_args = run(data_home.path(), &[]);
-    let help = run(data_home.path(), &["--help"]);
+    let no_args = fixture.run(&[]);
+    let help = fixture.run(&["--help"]);
 
     assert_eq!(no_args.status.code(), Some(0));
     assert_eq!(help.status.code(), Some(0));
@@ -42,19 +24,19 @@ fn no_arguments_matches_long_help_without_opening_the_database() {
     assert!(text(&no_args.stdout).contains("--full"));
     assert!(no_args.stderr.is_empty());
     assert!(help.stderr.is_empty());
-    assert!(!data_home.path().join("lexi/lexi.db").exists());
+    assert!(!fixture.database_path().exists());
 }
 
 #[test]
 fn long_version_succeeds_without_opening_the_database() {
-    let data_home = TempDir::new().unwrap();
+    let fixture = CliFixture::new();
 
-    let output = run(data_home.path(), &["--version"]);
+    let output = fixture.run(&["--version"]);
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(text(&output.stdout), "lexi 0.1.0\n");
     assert!(output.stderr.is_empty());
-    assert!(!data_home.path().join("lexi/lexi.db").exists());
+    assert!(!fixture.database_path().exists());
 }
 
 #[test]
@@ -82,8 +64,8 @@ fn invalid_arguments_and_mode_conflicts_exit_two_on_stderr() {
     ];
 
     for args in cases {
-        let data_home = TempDir::new().unwrap();
-        let output = run(data_home.path(), &args);
+        let fixture = CliFixture::new();
+        let output = fixture.run(&args);
 
         assert_eq!(
             output.status.code(),
@@ -101,21 +83,21 @@ fn invalid_arguments_and_mode_conflicts_exit_two_on_stderr() {
             "missing argument error for {args:?}: {}",
             text(&output.stderr)
         );
-        assert!(!data_home.path().join("lexi/lexi.db").exists());
+        assert!(!fixture.database_path().exists());
     }
 }
 
 #[test]
 fn empty_list_bootstraps_the_xdg_database_and_writes_no_output() {
-    let data_home = TempDir::new().unwrap();
+    let fixture = CliFixture::new();
 
-    let output = run(data_home.path(), &["--list"]);
+    let output = fixture.run(&["--list"]);
 
     assert_eq!(output.status.code(), Some(0));
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
 
-    let database = data_home.path().join("lexi/lexi.db");
+    let database = fixture.database_path();
     assert!(database.is_file());
     let connection = Connection::open(database).unwrap();
     let version: i64 = connection
@@ -163,10 +145,10 @@ fn list_ignores_relative_xdg_data_home_and_uses_home_fallback() {
 
 #[test]
 fn closed_stdout_is_a_runtime_error_for_help_version_and_nonempty_list() {
-    let data_home = TempDir::new().unwrap();
-    let bootstrap = run(data_home.path(), &["--list"]);
+    let fixture = CliFixture::new();
+    let bootstrap = fixture.run(&["--list"]);
     assert_eq!(bootstrap.status.code(), Some(0));
-    let database = data_home.path().join("lexi/lexi.db");
+    let database = fixture.database_path();
     Connection::open(database)
         .unwrap()
         .execute(
@@ -174,16 +156,15 @@ fn closed_stdout_is_a_runtime_error_for_help_version_and_nonempty_list() {
             [],
         )
         .unwrap();
-    let list = run(data_home.path(), &["--list"]);
+    let list = fixture.run(&["--list"]);
     assert_eq!(list.status.code(), Some(0));
     assert_eq!(text(&list.stdout), "test\t0\n");
     assert!(list.stderr.is_empty());
 
     for args in [&["--help"][..], &["--version"][..], &["--list"][..]] {
-        let output = Command::new(env!("CARGO_BIN_EXE_lexi"))
+        let output = fixture
+            .command()
             .args(args)
-            .env("XDG_DATA_HOME", data_home.path())
-            .env_remove("HOME")
             .stdout(closed_output())
             .output()
             .expect("lexi should run");
@@ -199,11 +180,10 @@ fn closed_stdout_is_a_runtime_error_for_help_version_and_nonempty_list() {
 
 #[test]
 fn unavailable_stderr_does_not_change_the_runtime_exit_code() {
-    let data_home = TempDir::new().unwrap();
-    let status = Command::new(env!("CARGO_BIN_EXE_lexi"))
+    let fixture = CliFixture::new();
+    let status = fixture
+        .command()
         .arg("--version")
-        .env("XDG_DATA_HOME", data_home.path())
-        .env_remove("HOME")
         .stdout(closed_output())
         .stderr(closed_output())
         .status()
@@ -214,14 +194,14 @@ fn unavailable_stderr_does_not_change_the_runtime_exit_code() {
 
 #[test]
 fn list_rejects_a_database_from_a_future_schema_version() {
-    let data_home = TempDir::new().unwrap();
-    let data_dir = data_home.path().join("lexi");
+    let fixture = CliFixture::new();
+    let data_dir = fixture.data_home().join("lexi");
     std::fs::create_dir_all(&data_dir).unwrap();
     let connection = Connection::open(data_dir.join("lexi.db")).unwrap();
     connection.pragma_update(None, "user_version", 2).unwrap();
     drop(connection);
 
-    let output = run(data_home.path(), &["--list"]);
+    let output = fixture.run(&["--list"]);
 
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());

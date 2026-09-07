@@ -1,14 +1,16 @@
-use std::fs::{self, File};
+mod support;
+
+use std::fs::File;
 use std::io::Read;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use rustix::fs::{Mode, OFlags};
 use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
 use rustix::termios::{OptionalActions, Winsize, tcgetattr, tcsetattr, tcsetwinsize};
-use tempfile::TempDir;
 
-fn tty_query(data_home: &Path, width: u16, no_color: bool, args: &[&str]) -> String {
+use support::{CliFixture, text};
+
+fn tty_query(fixture: &CliFixture, width: u16, no_color: bool, args: &[&str]) -> String {
     let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC).unwrap();
     grantpt(&master).unwrap();
     unlockpt(&master).unwrap();
@@ -32,13 +34,10 @@ fn tty_query(data_home: &Path, width: u16, no_color: bool, args: &[&str]) -> Str
         },
     )
     .unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lexi"));
+    let mut command = fixture.command();
     command
         .args(args)
-        .env("XDG_DATA_HOME", data_home)
-        .env_remove("HOME")
         .env("TERM", "xterm-256color")
-        .stdin(Stdio::null())
         .stdout(Stdio::from(slave))
         .stderr(Stdio::piped());
     if no_color {
@@ -69,24 +68,20 @@ fn tty_query(data_home: &Path, width: u16, no_color: bool, args: &[&str]) -> Str
 
 #[test]
 fn real_tty_wraps_and_styles_while_no_color_and_raw_are_respected() {
-    let temporary = TempDir::new().unwrap();
-    let data_home = temporary.path().join("data");
-    let fixture = temporary.path().join("sample.jsonl");
+    let fixture = CliFixture::new();
     let definition = include_str!("fixtures/post.html");
-    fs::write(
-        &fixture,
+    let jsonl = fixture.write_jsonl(
+        "sample.jsonl",
         serde_json::json!({"headword": "post", "definition": definition}).to_string(),
-    )
-    .unwrap();
-    let imported = Command::new(env!("CARGO_BIN_EXE_lexi"))
-        .args(["--import", fixture.to_str().unwrap(), "--name", "sample"])
-        .env("XDG_DATA_HOME", &data_home)
-        .env_remove("HOME")
+    );
+    let imported = fixture
+        .command()
+        .args(["--import", jsonl.to_str().unwrap(), "--name", "sample"])
         .output()
         .unwrap();
     assert!(imported.status.success());
-    let colored = tty_query(&data_home, 24, false, &["post"]);
-    let plain = tty_query(&data_home, 24, true, &["post"]);
+    let colored = tty_query(&fixture, 24, false, &["post"]);
+    let plain = tty_query(&fixture, 24, true, &["post"]);
     assert!(colored.contains("\x1b[1m"));
     assert!(colored.contains("\x1b[2m"));
     assert!(colored.contains("\x1b[1m  noun\x1b[0m"));
@@ -104,12 +99,8 @@ fn real_tty_wraps_and_styles_while_no_color_and_raw_are_respected() {
             .lines()
             .all(|line| textwrap::core::display_width(line) <= 24)
     );
-    let pipe = Command::new(env!("CARGO_BIN_EXE_lexi"))
-        .arg("post")
-        .env("XDG_DATA_HOME", &data_home)
-        .output()
-        .unwrap();
-    let pipe = String::from_utf8(pipe.stdout).unwrap();
+    let pipe = fixture.command().arg("post").output().unwrap();
+    let pipe = text(&pipe.stdout);
     assert!(!pipe.contains('\x1b'));
     assert!(pipe.contains("\n     > First marker example.\n       第一个例句。"));
     assert!(pipe.contains("\n     - (rare) A distinct subsense.\n       （罕见）不同的子义项。"));
@@ -119,7 +110,7 @@ fn real_tty_wraps_and_styles_while_no_color_and_raw_are_respected() {
     );
     let words = |text: &str| text.split_whitespace().collect::<String>();
     assert_eq!(words(&plain), words(&pipe));
-    let narrow = tty_query(&data_home, 2, true, &["post"]);
+    let narrow = tty_query(&fixture, 2, true, &["post"]);
     assert!(
         narrow
             .lines()
@@ -128,13 +119,13 @@ fn real_tty_wraps_and_styles_while_no_color_and_raw_are_respected() {
     assert_eq!(words(&narrow), words(&pipe));
     assert_eq!(narrow.matches('>').count(), pipe.matches('>').count());
     assert_eq!(narrow.matches('-').count(), pipe.matches('-').count());
-    let full = tty_query(&data_home, 24, true, &["post", "--full"]);
+    let full = tty_query(&fixture, 24, true, &["post", "--full"]);
     assert!(!full.contains("Omitted:"));
     assert!(full.contains("> Subsense"));
     assert!(
         full.lines()
             .all(|line| textwrap::core::display_width(line) <= 24)
     );
-    let raw = tty_query(&data_home, 8, false, &["post", "--raw"]);
+    let raw = tty_query(&fixture, 8, false, &["post", "--raw"]);
     assert_eq!(raw, format!("post\n{definition}"));
 }
