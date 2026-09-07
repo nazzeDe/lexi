@@ -2,7 +2,7 @@
 
 ## 状态
 
-Ready
+Completed
 
 ## 目的
 
@@ -180,19 +180,19 @@ interface 的完整语义：
 
 ## Acceptance
 
-- [ ] `src/storage.rs` 存在字段私有的 `pub(crate) struct Lookup<'storage>`，且字段与本 ticket 完全一致。
-- [ ] `Storage::lookup` 与 `Lookup::find` 的可见性、参数和返回类型与最终 interface 一致。
-- [ ] `Storage::lookup` 先做空库预检，再解析整个 dictionary name 批次，成功后才返回 `Lookup`。
-- [ ] `query::run` 每批只构造一次 `Lookup`，term 循环只调用 `find`。
-- [ ] `query.rs` 不引用 `DictionaryScope`、`has_any_dictionary`、`resolve_dictionaries`、`lookup_folded` 或 `select_matches`。
-- [ ] `DictionaryScope` 及三个 storage helper 都是 storage 私有 implementation。
-- [ ] `Lookup::find` 执行全局原词头精确匹配优先，并保留 fallback、主键顺序与重复项。
-- [ ] SQL、参数、行构造和两种查询计划测试仍在 `storage.rs`。
-- [ ] 没有新增 trait、第二存储 implementation 或 adapter。
-- [ ] query/storage 单元测试按本 ticket逐项迁移，不保留针对旧浅 interface 的重复测试。
-- [ ] CLI 查询行为测试全部通过，输出和退出码无变化。
-- [ ] 当前输出 `Options`/provenance/`first_record` 仍由 query 持有，未提前实施 Ticket 01。
-- [ ] `cargo fmt --check` 和 clippy 通过。
+- [x] `src/storage.rs` 存在字段私有的 `pub(crate) struct Lookup<'storage>`，且字段与本 ticket 完全一致。
+- [x] `Storage::lookup` 与 `Lookup::find` 的可见性、参数和返回类型与最终 interface 一致。
+- [x] `Storage::lookup` 先做空库预检，再解析整个 dictionary name 批次，成功后才返回 `Lookup`。
+- [x] `query::run` 每批只构造一次 `Lookup`，term 循环只调用 `find`。
+- [x] `query.rs` 不引用 `DictionaryScope`、`has_any_dictionary`、`resolve_dictionaries`、`lookup_folded` 或 `select_matches`。
+- [x] `DictionaryScope` 及三个 storage helper 都是 storage 私有 implementation。
+- [x] `Lookup::find` 执行全局原词头精确匹配优先，并保留 fallback、主键顺序与重复项。
+- [x] SQL、参数、行构造和两种查询计划测试仍在 `storage.rs`。
+- [x] 没有新增 trait、第二存储 implementation 或 adapter。
+- [x] query/storage 单元测试按本 ticket逐项迁移，不保留针对旧浅 interface 的重复测试。
+- [x] CLI 查询行为测试全部通过，输出和退出码无变化。
+- [x] 当前输出 `Options`/provenance/`first_record` 仍由 query 持有，未提前实施 Ticket 01。
+- [x] `cargo fmt --check` 和 clippy 通过。
 
 ## Validation
 

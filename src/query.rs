@@ -1,10 +1,10 @@
 use std::io::Write;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::output;
 use crate::record::{DictionaryName, QueryTerm};
-use crate::storage::{Storage, StoredEntry};
+use crate::storage::Storage;
 
 #[derive(Debug)]
 pub enum Outcome {
@@ -20,15 +20,12 @@ pub fn run(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<Outcome> {
-    if !storage.has_any_dictionary()? {
-        bail!("no dictionaries are installed");
-    }
-    let scope = storage.resolve_dictionaries(dictionaries)?;
+    let lookup = storage.lookup(dictionaries)?;
 
     let mut missing = false;
     let mut first_record = true;
     for term in terms {
-        let matches = select_matches(term, storage.lookup_folded(term.folded(), &scope)?);
+        let matches = lookup.find(term)?;
         if matches.is_empty() {
             output::write_miss(stderr, term.text())
                 .context("failed to write query diagnostic to stderr")?;
@@ -65,25 +62,9 @@ pub fn run(
     })
 }
 
-fn select_matches(term: &QueryTerm, candidates: Vec<StoredEntry>) -> Vec<StoredEntry> {
-    // Exact original-headword matches win across the whole selected set;
-    // dictionaries never fall back independently.
-    if candidates
-        .iter()
-        .any(|entry| entry.headword() == term.text())
-    {
-        candidates
-            .into_iter()
-            .filter(|entry| entry.headword() == term.text())
-            .collect()
-    } else {
-        candidates
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Outcome, run, select_matches};
+    use super::{Outcome, run};
     use crate::output::Options;
     use crate::record::{DictionaryName, Entry, QueryTerm};
     use crate::storage::Storage;
@@ -140,54 +121,6 @@ mod tests {
     }
 
     #[test]
-    fn global_exact_match_suppresses_case_variants_from_other_dictionaries() {
-        let (_directory, storage) = storage_with(&[
-            ("oxford", &[("Hello", "oxford Hello")]),
-            ("longman", &[("hello", "longman hello")]),
-        ]);
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        let outcome = run(
-            &storage,
-            &[term("hello")],
-            &[],
-            Options {
-                show_dictionary: true,
-                ..Options::default()
-            },
-            &mut stdout,
-            &mut stderr,
-        )
-        .unwrap();
-
-        assert!(matches!(outcome, Outcome::AllFound));
-        assert_eq!(stdout, b"[longman] hello\nlongman hello\n");
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
-    fn case_fallback_keeps_every_folded_candidate() {
-        let (_directory, storage) =
-            storage_with(&[("oxford", &[("Hello", "first"), ("HELLO", "second")])]);
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-
-        run(
-            &storage,
-            &[term("hello")],
-            &[],
-            Options::default(),
-            &mut stdout,
-            &mut stderr,
-        )
-        .unwrap();
-
-        assert_eq!(stdout, b"Hello\nfirst\n\nHELLO\nsecond\n");
-        assert!(stderr.is_empty());
-    }
-
-    #[test]
     fn batch_writes_misses_to_stderr_and_keeps_hits() {
         let (_directory, storage) = storage_with(&[("oxford", &[("hello", "world")])]);
         let mut stdout = Vec::new();
@@ -206,23 +139,5 @@ mod tests {
         assert!(matches!(outcome, Outcome::SomeMissing));
         assert_eq!(stdout, b"hello\nworld\n\nhello\nworld\n");
         assert_eq!(stderr, b"No entry found for: helo\n");
-    }
-
-    #[test]
-    fn select_matches_is_global_not_per_dictionary() {
-        let (_directory, storage) = storage_with(&[
-            ("oxford", &[("Hello", "oxford")]),
-            ("longman", &[("hello", "longman")]),
-        ]);
-        let scope = storage.resolve_dictionaries(&[]).unwrap();
-        let candidates = storage.lookup_folded("hello", &scope).unwrap();
-        let selected = select_matches(&term("hello"), candidates);
-        assert_eq!(
-            selected
-                .iter()
-                .map(|entry| (entry.dictionary_name(), entry.headword()))
-                .collect::<Vec<_>>(),
-            vec![("longman", "hello")]
-        );
     }
 }

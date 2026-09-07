@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 
-use crate::record::{DictionaryName, Entry};
+use crate::record::{DictionaryName, Entry, QueryTerm};
 
 pub const SCHEMA_VERSION: i32 = 1;
 
@@ -16,8 +16,13 @@ pub struct Storage {
 
 /// Selected dictionaries for a lookup. An empty caller list means every dictionary.
 #[derive(Debug)]
-pub struct DictionaryScope {
+struct DictionaryScope {
     ids: Option<Vec<i64>>,
+}
+
+pub(crate) struct Lookup<'storage> {
+    storage: &'storage Storage,
+    scope: DictionaryScope,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +103,18 @@ impl Storage {
             .context("failed to read dictionary list")
     }
 
-    pub fn has_any_dictionary(&self) -> Result<bool> {
+    pub(crate) fn lookup(&self, dictionaries: &[DictionaryName]) -> Result<Lookup<'_>> {
+        if !self.has_any_dictionary()? {
+            bail!("no dictionaries are installed");
+        }
+        let scope = self.resolve_dictionaries(dictionaries)?;
+        Ok(Lookup {
+            storage: self,
+            scope,
+        })
+    }
+
+    fn has_any_dictionary(&self) -> Result<bool> {
         let exists: i64 = self
             .connection
             .query_row("SELECT EXISTS(SELECT 1 FROM dictionaries)", [], |row| {
@@ -108,7 +124,7 @@ impl Storage {
         Ok(exists != 0)
     }
 
-    pub fn resolve_dictionaries(&self, names: &[DictionaryName]) -> Result<DictionaryScope> {
+    fn resolve_dictionaries(&self, names: &[DictionaryName]) -> Result<DictionaryScope> {
         if names.is_empty() {
             return Ok(DictionaryScope { ids: None });
         }
@@ -132,7 +148,7 @@ impl Storage {
         Ok(DictionaryScope { ids: Some(ids) })
     }
 
-    pub fn lookup_folded(
+    fn lookup_folded(
         &self,
         folded_headword: &str,
         scope: &DictionaryScope,
@@ -243,6 +259,25 @@ impl Storage {
         tx.commit()
             .with_context(|| format!("failed to commit removal of dictionary '{original_name}'"))?;
         Ok((original_name, entry_count))
+    }
+}
+
+impl Lookup<'_> {
+    pub(crate) fn find(&self, term: &QueryTerm) -> Result<Vec<StoredEntry>> {
+        let candidates = self.storage.lookup_folded(term.folded(), &self.scope)?;
+        // Exact original-headword matches win across the whole selected set;
+        // dictionaries never fall back independently.
+        if candidates
+            .iter()
+            .any(|entry| entry.headword() == term.text())
+        {
+            Ok(candidates
+                .into_iter()
+                .filter(|entry| entry.headword() == term.text())
+                .collect())
+        } else {
+            Ok(candidates)
+        }
     }
 }
 
@@ -371,7 +406,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{ImportOutcome, SCHEMA_VERSION, Storage};
-    use crate::record::{DictionaryName, Entry};
+    use crate::record::{DictionaryName, Entry, QueryTerm};
 
     fn database_path(directory: &TempDir) -> std::path::PathBuf {
         directory.path().join("nested/data/lexi.db")
@@ -407,10 +442,11 @@ mod tests {
             .unwrap()
     }
 
-    fn folded_lookup(storage: &Storage, folded: &str) -> Vec<(String, String, String)> {
-        let scope = storage.resolve_dictionaries(&[]).unwrap();
+    fn find_entries(storage: &Storage, raw: &str) -> Vec<(String, String, String)> {
         storage
-            .lookup_folded(folded, &scope)
+            .lookup(&[])
+            .unwrap()
+            .find(&QueryTerm::parse(raw).unwrap())
             .unwrap()
             .into_iter()
             .map(|entry| {
@@ -689,8 +725,11 @@ mod tests {
         );
         import_ok(&mut storage, "longman", [entry("HELLO", "3")], false);
 
-        let scope = storage.resolve_dictionaries(&[]).unwrap();
-        let found = storage.lookup_folded("hello", &scope).unwrap();
+        let found = storage
+            .lookup(&[])
+            .unwrap()
+            .find(&QueryTerm::parse("HeLLo").unwrap())
+            .unwrap();
         assert_eq!(
             found
                 .iter()
@@ -721,8 +760,8 @@ mod tests {
             DictionaryName::parse("OXFORD").unwrap(),
             DictionaryName::parse("oxford").unwrap(),
         ];
-        let scope = storage.resolve_dictionaries(&names).unwrap();
-        let found = storage.lookup_folded("hello", &scope).unwrap();
+        let lookup = storage.lookup(&names).unwrap();
+        let found = lookup.find(&QueryTerm::parse("hello").unwrap()).unwrap();
         assert_eq!(
             found
                 .iter()
@@ -733,17 +772,124 @@ mod tests {
     }
 
     #[test]
-    fn resolve_dictionaries_rejects_unknown_names() {
+    fn lookup_rejects_unknown_names_before_find() {
         let directory = TempDir::new().unwrap();
         let mut storage = Storage::open_at(database_path(&directory)).unwrap();
         import_ok(&mut storage, "oxford", [entry("hello", "def")], false);
 
         let error = storage
-            .resolve_dictionaries(&[DictionaryName::parse("missing").unwrap()])
-            .unwrap_err();
+            .lookup(&[DictionaryName::parse("missing").unwrap()])
+            .err()
+            .expect("unknown dictionary must fail before find");
         assert!(
             format!("{error:#}").contains("unknown dictionary 'missing'"),
             "{error:#}"
+        );
+    }
+
+    #[test]
+    fn lookup_rejects_an_empty_database() {
+        let directory = TempDir::new().unwrap();
+        let storage = Storage::open_at(database_path(&directory)).unwrap();
+
+        let error = storage
+            .lookup(&[])
+            .err()
+            .expect("empty database must fail before find");
+        assert!(
+            format!("{error:#}").contains("no dictionaries are installed"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn find_prefers_all_global_original_headword_matches() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+        import_ok(
+            &mut storage,
+            "oxford",
+            [
+                entry("Hello", "oxford Hello"),
+                entry("hello", "oxford hello"),
+            ],
+            false,
+        );
+        import_ok(
+            &mut storage,
+            "longman",
+            [
+                entry("hello", "longman hello"),
+                entry("HELLO", "longman HELLO"),
+            ],
+            false,
+        );
+
+        let found = storage
+            .lookup(&[])
+            .unwrap()
+            .find(&QueryTerm::parse("hello").unwrap())
+            .unwrap();
+        assert_eq!(
+            found
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.dictionary_name(),
+                        entry.headword(),
+                        entry.definition(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("oxford", "hello", "oxford hello"),
+                ("longman", "hello", "longman hello"),
+            ]
+        );
+    }
+
+    #[test]
+    fn one_lookup_reuses_scope_for_multiple_terms() {
+        let directory = TempDir::new().unwrap();
+        let mut storage = Storage::open_at(database_path(&directory)).unwrap();
+        import_ok(
+            &mut storage,
+            "oxford",
+            [
+                entry("hello", "oxford hello"),
+                entry("world", "oxford world"),
+            ],
+            false,
+        );
+        import_ok(
+            &mut storage,
+            "longman",
+            [
+                entry("hello", "longman hello"),
+                entry("world", "longman world"),
+            ],
+            false,
+        );
+
+        let lookup = storage
+            .lookup(&[DictionaryName::parse("oxford").unwrap()])
+            .unwrap();
+        let hello = lookup.find(&QueryTerm::parse("hello").unwrap()).unwrap();
+        let world = lookup.find(&QueryTerm::parse("world").unwrap()).unwrap();
+
+        assert_eq!(
+            hello
+                .iter()
+                .map(|entry| (entry.dictionary_name(), entry.definition()))
+                .collect::<Vec<_>>(),
+            vec![("oxford", "oxford hello")]
+        );
+        assert_eq!(
+            world
+                .iter()
+                .map(|entry| (entry.dictionary_name(), entry.definition()))
+                .collect::<Vec<_>>(),
+            vec![("oxford", "oxford world")]
         );
     }
 
@@ -824,16 +970,16 @@ mod tests {
                 ("world".into(), "three".into(), 3),
             ]
         );
-        assert!(folded_lookup(&storage, "old").is_empty());
+        assert!(find_entries(&storage, "old").is_empty());
         assert_eq!(
-            folded_lookup(&storage, "hello"),
+            find_entries(&storage, "hello"),
             vec![
                 ("oxford".into(), "hello".into(), "new one".into()),
                 ("oxford".into(), "hello".into(), "new two".into()),
             ]
         );
         assert_eq!(
-            folded_lookup(&storage, "safe"),
+            find_entries(&storage, "safe"),
             vec![("keep".into(), "safe".into(), "yes".into())]
         );
     }
@@ -870,7 +1016,7 @@ mod tests {
         import_ok(&mut storage, "keep", [entry("safe", "yes")], false);
         let before_list = storage.list_dictionaries().unwrap();
         let before_entries = stored_entries(&storage);
-        let before_lookup = folded_lookup(&storage, "old");
+        let before_lookup = find_entries(&storage, "old");
 
         let entries: [Result<Entry>; 3] = [
             Ok(entry("one", "1")),
@@ -884,7 +1030,7 @@ mod tests {
         assert!(format!("{error:#}").contains("at line 3"), "{error:#}");
         assert_eq!(storage.list_dictionaries().unwrap(), before_list);
         assert_eq!(stored_entries(&storage), before_entries);
-        assert_eq!(folded_lookup(&storage, "old"), before_lookup);
+        assert_eq!(find_entries(&storage, "old"), before_lookup);
         assert_eq!(
             before_lookup,
             vec![
@@ -906,7 +1052,7 @@ mod tests {
         );
         let before_list = storage.list_dictionaries().unwrap();
         let before_entries = stored_entries(&storage);
-        let before_lookup = folded_lookup(&storage, "old");
+        let before_lookup = find_entries(&storage, "old");
 
         storage
             .connection
@@ -932,7 +1078,7 @@ mod tests {
         );
         assert_eq!(storage.list_dictionaries().unwrap(), before_list);
         assert_eq!(stored_entries(&storage), before_entries);
-        assert_eq!(folded_lookup(&storage, "old"), before_lookup);
+        assert_eq!(find_entries(&storage, "old"), before_lookup);
     }
 
     #[test]
@@ -960,9 +1106,9 @@ mod tests {
             stored_entries(&storage),
             vec![("safe".into(), "yes".into(), 1)]
         );
-        assert!(folded_lookup(&storage, "hello").is_empty());
+        assert!(find_entries(&storage, "hello").is_empty());
         assert_eq!(
-            folded_lookup(&storage, "safe"),
+            find_entries(&storage, "safe"),
             vec![("keep".into(), "safe".into(), "yes".into())]
         );
     }
@@ -979,7 +1125,7 @@ mod tests {
         );
         let before_list = storage.list_dictionaries().unwrap();
         let before_entries = stored_entries(&storage);
-        let before_lookup = folded_lookup(&storage, "hello");
+        let before_lookup = find_entries(&storage, "hello");
 
         let error = storage
             .remove_dictionary(&DictionaryName::parse("missing").unwrap())
@@ -991,6 +1137,6 @@ mod tests {
         );
         assert_eq!(storage.list_dictionaries().unwrap(), before_list);
         assert_eq!(stored_entries(&storage), before_entries);
-        assert_eq!(folded_lookup(&storage, "hello"), before_lookup);
+        assert_eq!(find_entries(&storage, "hello"), before_lookup);
     }
 }
