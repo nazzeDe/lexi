@@ -2,7 +2,7 @@
 
 ## 状态
 
-Ready
+Completed
 
 ## 目的
 
@@ -201,20 +201,20 @@ stream/state/miss/写错误/来源标注覆盖迁到公开 `new`/`records`/`miss
 
 ## Acceptance
 
-- [ ] `QueryOutput<'a>` 的可见性、字段、字段顺序和私有性与最终 interface 一致。
-- [ ] `new`、`records`、`miss` 的参数和 `anyhow::Result` 返回类型与最终 interface 一致；`record` 若存在则不是公开 interface。
-- [ ] `records` 只接收一个查询词的最终字符串元组，空迭代器不写字节。
-- [ ] 有效 `show_dictionary` 由输出模块计算，`query.rs` 不再计算 provenance。
-- [ ] 单条 record 只在全部 stdout 写入成功后把 `wrote_record` 设为 true。
-- [ ] `miss` 的成功与失败路径都不修改 `wrote_record`。
-- [ ] stdout/stderr 错误上下文已从 query 调用方收进 `QueryOutput`，字符串逐字不变。
-- [ ] `query::run` 每批只构造一个 `QueryOutput`，`src/query.rs` 中没有独立词 `first_record`。
-- [ ] 旧 `write_record`/`write_miss` 公开 interface 已删除，且 `src`、`tests` 中无调用方。
-- [ ] `output` 模块不依赖 `StoredEntry` 或其他 storage 类型。
-- [ ] HTML/`structured` 转换全部保持私有，现有转换代码没有无关重写。
-- [ ] stream/state/错误覆盖在 `QueryOutput` interface 上，下层 parser 测试未重复包装。
-- [ ] query 单元测试和 CLI query/TTY 行为测试全部通过，输出逐字节不变。
-- [ ] 完整仓库开发门禁通过，四项架构深化均完成。
+- [x] `QueryOutput<'a>` 的可见性、字段、字段顺序和私有性与最终 interface 一致。证据：`src/output.rs` 为 `pub(crate) struct QueryOutput<'a>`，字段顺序 `stdout`/`stderr`/`options`/`wrote_record`，全部私有。
+- [x] `new`、`records`、`miss` 的参数和 `anyhow::Result` 返回类型与最终 interface 一致；`record` 若存在则不是公开 interface。证据：`rg` 命中三个 `pub(crate) fn`；私有 `fn record` 无 `pub`。
+- [x] `records` 只接收一个查询词的最终字符串元组，空迭代器不写字节。证据：`empty_records_write_nothing_and_do_not_affect_later_separators` 通过。
+- [x] 有效 `show_dictionary` 由输出模块计算，`query.rs` 不再计算 provenance。证据：`automatic_dictionary_names_are_per_records_call_not_across_calls` 与 `raw_disables_automatic_dictionary_names_but_explicit_flag_is_honored`；`src/query.rs` 无 `multiple_dictionaries`。
+- [x] 单条 record 只在全部 stdout 写入成功后把 `wrote_record` 设为 true。证据：`wrote_record = true` 位于全部写入之后；before-first / mid-record / after-success 失败重试测试观察分隔字节。
+- [x] `miss` 的成功与失败路径都不修改 `wrote_record`。证据：`miss_then_records_has_no_leading_blank_line` 与 `stderr_failure_then_successful_record_has_no_leading_blank_line`。
+- [x] stdout/stderr 错误上下文已从 query 调用方收进 `QueryOutput`，字符串逐字不变。证据：output 失败测试含既有上下文字符串；`closed_stdout_during_query_is_a_runtime_error` 与 `closed_stderr_during_a_miss_is_a_runtime_error` 通过。
+- [x] `query::run` 每批只构造一个 `QueryOutput`，`src/query.rs` 中没有独立词 `first_record`。证据：term 循环前一次 `QueryOutput::new`；`rg '\bfirst_record\b'` 退出码 1。
+- [x] 旧 `write_record`/`write_miss` 公开 interface 已删除，且 `src`、`tests` 中无调用方。证据：对应 `rg` 退出码 1。
+- [x] `output` 模块不依赖 `StoredEntry` 或其他 storage 类型。证据：`rg StoredEntry|Storage|Lookup|QueryTerm` 对 `src/output.rs src/output` 退出码 1。
+- [x] HTML/`structured` 转换全部保持私有，现有转换代码没有无关重写。证据：`git diff -- src/output/structured.rs` 空；`write_line`/`write_structured`/`write_blocks` 仅 `Write + ?Sized` 适配。
+- [x] stream/state/错误覆盖在 `QueryOutput` interface 上，下层 parser 测试未重复包装。证据：替换/新增 9 个 `QueryOutput` interface 测试；既有 `rendered`/structured 测试仍走单条 `records` 或私有 helper。
+- [x] query 单元测试和 CLI query/TTY 行为测试全部通过，输出逐字节不变。证据：`query::tests` 2 passed；`--test query` 22 passed；`output_terminal` 1 passed；post/hello/run default+full 六 hash 与 `252e55d` 基线一致。
+- [x] 完整仓库开发门禁通过，四项架构深化均完成。证据：`cargo fmt --check`、`clippy --all-targets -- -D warnings`、`cargo test` 121 passed、`cargo build --release` 通过。
 
 ## Validation
 

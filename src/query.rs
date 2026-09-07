@@ -1,8 +1,8 @@
 use std::io::Write;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
-use crate::output;
+use crate::output::{self, QueryOutput};
 use crate::record::{DictionaryName, QueryTerm};
 use crate::storage::Storage;
 
@@ -21,38 +21,23 @@ pub fn run(
     stderr: &mut impl Write,
 ) -> Result<Outcome> {
     let lookup = storage.lookup(dictionaries)?;
+    let mut output = QueryOutput::new(stdout, stderr, options);
 
     let mut missing = false;
-    let mut first_record = true;
     for term in terms {
         let matches = lookup.find(term)?;
         if matches.is_empty() {
-            output::write_miss(stderr, term.text())
-                .context("failed to write query diagnostic to stderr")?;
+            output.miss(term.text())?;
             missing = true;
             continue;
         }
-        let multiple_dictionaries = matches.first().is_some_and(|first| {
-            matches
-                .iter()
-                .any(|entry| entry.dictionary_name() != first.dictionary_name())
-        });
-        let record_options = output::Options {
-            show_dictionary: options.show_dictionary || (!options.raw && multiple_dictionaries),
-            ..options
-        };
-        for entry in &matches {
-            output::write_record(
-                stdout,
+        output.records(matches.iter().map(|entry| {
+            (
                 entry.dictionary_name(),
                 entry.headword(),
                 entry.definition(),
-                record_options,
-                first_record,
             )
-            .context("failed to write query result to stdout")?;
-            first_record = false;
-        }
+        }))?;
     }
 
     Ok(if missing {

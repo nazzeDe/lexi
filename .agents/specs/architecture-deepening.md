@@ -2,7 +2,9 @@
 
 ## 状态
 
-Ready
+Completed
+
+四项任务已按 `03 -> 04 -> 02 -> 01` 串行实现，由 `xai/grok-4.6` 子代理执行并经独立同模型 reviewer 复审通过（无发现）。父会话复跑 121 项测试、fmt、clippy、release 构建，以及临时词库的原文完整性与 PTY 验证；post/hello/run 的 default/full 六份输出哈希与 `252e55d` 基线一致。
 
 ## 背景和目标
 
@@ -24,7 +26,7 @@ Lexi 第一版已经具备严格 JSONL 导入、SQLite 持久化、精确查词�
 
 ## 当前结构与目标结构
 
-### 当前结构
+### 当前结构（重构前基线）
 
 1. `query.rs` 调用 `storage.has_any_dictionary`、`storage.resolve_dictionaries` 和 `storage.lookup_folded`，并自行执行精确词头优先筛选。
 2. `query.rs` 持有 `first_record`，按 term 计算多词典来源标注，再把 `output::Options` 和分隔状态传给 `output::write_record`；`output::write_miss` 是另一条浅接口。`Options` 现含 `show_dictionary`/`raw`/`full`/`terminal`。渲染（含既有私有 `output/structured.rs`）已在输出模块内。
@@ -146,17 +148,17 @@ main.rs
 
 ## 整体验收
 
-- [ ] 严格按 `03 -> 04 -> 02 -> 01` 完成，02 与 01 未并行修改 `query.rs`。
+- [x] 严格按 `03 -> 04 -> 02 -> 01` 完成，02 与 01 未并行修改 `query.rs`。证据：02 提交 `5938244` 后本 ticket 才改 `query.rs` 输出 seam。
 - [x] `tests/query.rs` 不再复制 lookup SQL 或执行查询计划，`storage.rs` 仍证明两种 SQL 使用 `entries_lookup` 且不全表扫描 entries。证据：Ticket 03 Validation；`rg` 对 `tests/query.rs` 退出码 1；storage 查询计划测试通过。
 - [x] 六个集成测试均声明 `mod support;` 并使用 `CliFixture`/共享函数；测试行为断言和专属 SQLite tuple 查询仍在各自文件；`output_terminal.rs` 的 PTY 细节仍本地。证据：Ticket 04 Validation；`rg "^mod support;$"` 六文件各一次；support 负向 `rg` 退出码 1；PTY helper 仍在 `output_terminal.rs`。
-- [x] `Storage::lookup` 一次完成空库预检和整批词典 scope 解析；`Lookup::find` 隐藏 folded mechanics 并执行全局原词头精确匹配优先。证据：Ticket 02 Validation；storage `rg` 命中 Lookup interface 与三个私有 helper；`cargo test storage::tests query::tests --test query` 通过。
+- [x] `Storage::lookup` 一次完成空库预检和整批词典 scope 解析；`Lookup::find` 隐藏 folded mechanics 并执行全局原词头精确匹配优先。证据：Ticket 02 Validation；storage `rg` 命中 Lookup interface 与三个私有 helper；`cargo test storage::tests`、`cargo test query::tests`、`cargo test --test query` 分别通过。
 - [x] `query.rs` 不再可见 `DictionaryScope`、`has_any_dictionary`、`resolve_dictionaries`、`lookup_folded` 或 `select_matches`。证据：Ticket 02 Validation；对 `src/query.rs` 的负向 `rg` 退出码 1。
-- [ ] `QueryOutput` 精确持有两个 writer、一份 `Options` 和 `wrote_record`；公开 interface 为 `new`/`records`/`miss`；只有单条 record 完整成功后更新状态，`miss` 不更新状态。
-- [ ] `output` 模块不依赖 `StoredEntry`；HTML/`structured` helper 保持私有。
-- [ ] 所有既有 CLI 输出字节、错误上下文、退出码、顺序、重复项、筛选、匹配优先、来源标注、TTY 与 `NO_COLOR` 行为通过测试。
-- [ ] SQLite 仍为唯一运行时数据源，删除或移动成功导入的 JSONL 后查询仍成功。
-- [ ] `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` 和 `cargo build --release` 全部通过。
-- [ ] 实现提交只包含四张 ticket 明确列出的生产代码与测试文件变更。
+- [x] `QueryOutput` 精确持有两个 writer、一份 `Options` 和 `wrote_record`；公开 interface 为 `new`/`records`/`miss`；只有单条 record 完整成功后更新状态，`miss` 不更新状态。证据：Ticket 01 Validation；struct 字段顺序；失败/miss 测试观察分隔字节。
+- [x] `output` 模块不依赖 `StoredEntry`；HTML/`structured` helper 保持私有。证据：Ticket 01 负向 `rg` 退出码 1；`src/output/structured.rs` 无 diff。
+- [x] 所有既有 CLI 输出字节、错误上下文、退出码、顺序、重复项、筛选、匹配优先、来源标注、TTY 与 `NO_COLOR` 行为通过测试。证据：`cargo test` 121 passed，含 query 22 与 output_terminal 1；post/hello/run default+full 六 hash 相等；`verify.py`/`verify_fix_pass.py` 通过。
+- [x] SQLite 仍为唯一运行时数据源，删除或移动成功导入的 JSONL 后查询仍成功。证据：`deleting_source_jsonl_does_not_affect_query` 与 `moving_the_source_jsonl_still_allows_query` 通过。
+- [x] `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test` 和 `cargo build --release` 全部通过。证据：Ticket 01 Validation。
+- [x] 实现提交包含四张 ticket 明确列出的生产代码与测试文件变更，以及授权的文档状态与过时约束校正。证据：03/04/02 提交已含 `.agents/` 状态勾选；本 ticket 生产 diff 仅 `src/output.rs` 与 `src/query.rs`，无 README/Cargo/storage/CLI 变更。
 
 ## Tickets
 

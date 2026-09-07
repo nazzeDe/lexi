@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 use std::io::{self, IsTerminal, Write};
 
+use anyhow::Context;
+
 mod structured;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -30,51 +32,99 @@ impl Terminal {
     }
 }
 
-pub fn write_record(
-    writer: &mut impl Write,
-    dictionary_name: &str,
-    headword: &str,
-    definition: &str,
+pub(crate) struct QueryOutput<'a> {
+    stdout: &'a mut dyn Write,
+    stderr: &'a mut dyn Write,
     options: Options,
-    first: bool,
-) -> io::Result<()> {
-    if !first {
-        writeln!(writer)?;
+    wrote_record: bool,
+}
+
+impl<'a> QueryOutput<'a> {
+    pub(crate) fn new(
+        stdout: &'a mut dyn Write,
+        stderr: &'a mut dyn Write,
+        options: Options,
+    ) -> Self {
+        Self {
+            stdout,
+            stderr,
+            options,
+            wrote_record: false,
+        }
     }
-    let title = if options.show_dictionary {
-        format!("[{dictionary_name}] {headword}")
-    } else {
-        headword.to_owned()
-    };
-    let terminal = if options.raw {
-        Terminal::default()
-    } else {
-        options.terminal
-    };
-    write_line(writer, &title, "", "", Style::Heading, terminal)?;
-    if !options.raw
-        && contains_html_tag(definition)
-        && let Some(blocks) = structured::parse(definition, headword)
-    {
-        return write_structured(writer, &blocks, options);
+
+    pub(crate) fn records<'record>(
+        &mut self,
+        records: impl IntoIterator<Item = (&'record str, &'record str, &'record str)>,
+    ) -> anyhow::Result<()> {
+        let records: Vec<_> = records.into_iter().collect();
+        if records.is_empty() {
+            return Ok(());
+        }
+        let multiple = records
+            .first()
+            .is_some_and(|first| records.iter().any(|record| record.0 != first.0));
+        let show_dictionary = self.options.show_dictionary || (!self.options.raw && multiple);
+        for (dictionary_name, headword, definition) in records {
+            self.record(dictionary_name, headword, definition, show_dictionary)
+                .context("failed to write query result to stdout")?;
+        }
+        Ok(())
     }
-    let is_html = contains_html_tag(definition);
-    let definition = render_definition(definition, options.raw);
-    if !options.raw && is_html && terminal.width.is_some() {
-        for line in definition.lines() {
-            if line.is_empty() {
-                writeln!(writer)?;
+
+    pub(crate) fn miss(&mut self, term: &str) -> anyhow::Result<()> {
+        writeln!(self.stderr, "No entry found for: {term}")
+            .context("failed to write query diagnostic to stderr")
+    }
+
+    fn record(
+        &mut self,
+        dictionary_name: &str,
+        headword: &str,
+        definition: &str,
+        show_dictionary: bool,
+    ) -> io::Result<()> {
+        if self.wrote_record {
+            writeln!(self.stdout)?;
+        }
+        let title = if show_dictionary {
+            format!("[{dictionary_name}] {headword}")
+        } else {
+            headword.to_owned()
+        };
+        let options = self.options;
+        let terminal = if options.raw {
+            Terminal::default()
+        } else {
+            options.terminal
+        };
+        write_line(self.stdout, &title, "", "", Style::Heading, terminal)?;
+        if !options.raw
+            && contains_html_tag(definition)
+            && let Some(blocks) = structured::parse(definition, headword)
+        {
+            write_structured(self.stdout, &blocks, options)?;
+        } else {
+            let is_html = contains_html_tag(definition);
+            let definition = render_definition(definition, options.raw);
+            if !options.raw && is_html && terminal.width.is_some() {
+                for line in definition.lines() {
+                    if line.is_empty() {
+                        writeln!(self.stdout)?;
+                    } else {
+                        write_line(self.stdout, line, "", "", Style::Plain, terminal)?;
+                    }
+                }
             } else {
-                write_line(writer, line, "", "", Style::Plain, terminal)?;
+                self.stdout.write_all(definition.as_bytes())?;
+                if !definition.ends_with('\n') {
+                    writeln!(self.stdout)?;
+                }
             }
         }
-        return Ok(());
+        self.wrote_record = true;
+        Ok(())
     }
-    writer.write_all(definition.as_bytes())?;
-    if !definition.ends_with('\n') {
-        writeln!(writer)?;
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -85,7 +135,7 @@ enum Style {
 }
 
 fn write_line(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     text: &str,
     initial: &str,
     continuation: &str,
@@ -145,7 +195,7 @@ fn example_count(blocks: &[structured::Block]) -> usize {
 }
 
 fn write_structured(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     blocks: &[structured::Block],
     options: Options,
 ) -> io::Result<()> {
@@ -207,7 +257,7 @@ fn is_part_of_speech(label: &str) -> bool {
 }
 
 fn write_blocks(
-    writer: &mut impl Write,
+    writer: &mut (impl Write + ?Sized),
     blocks: &[structured::Block],
     options: Options,
     omissions: &mut Omissions,
@@ -322,10 +372,6 @@ fn write_blocks(
         }
     }
     Ok(())
-}
-
-pub fn write_miss(writer: &mut impl Write, term: &str) -> io::Result<()> {
-    writeln!(writer, "No entry found for: {term}")
 }
 
 /// Default query output is terminal-readable. `--raw` keeps the stored definition
@@ -807,21 +853,66 @@ fn tidy_lines(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Options, write_miss, write_record};
+    use super::{Options, QueryOutput};
+    use std::io::{self, Write};
+
+    fn emit(dictionary_name: &str, headword: &str, definition: &str, options: Options) -> Vec<u8> {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        QueryOutput::new(&mut stdout, &mut stderr, options)
+            .records([(dictionary_name, headword, definition)])
+            .unwrap();
+        assert!(stderr.is_empty());
+        stdout
+    }
+
+    fn rendered(headword: &str, definition: &str, options: Options) -> String {
+        String::from_utf8(emit("arbitrary import name", headword, definition, options)).unwrap()
+    }
+
+    /// Allows `remaining` bytes, then returns one BrokenPipe, then writes normally.
+    struct FailAfter {
+        inner: Vec<u8>,
+        remaining: usize,
+        failed: bool,
+    }
+
+    impl Write for FailAfter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                if !self.failed {
+                    self.failed = true;
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"));
+                }
+                return self.inner.write(buf);
+            }
+            let n = buf.len().min(self.remaining);
+            self.remaining -= n;
+            self.inner.extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn pads_definition_newline_and_separates_records() {
-        let mut buf = Vec::new();
-        write_record(&mut buf, "oxford", "a", "one", Options::default(), true).unwrap();
-        write_record(&mut buf, "oxford", "b", "two\n", Options::default(), false).unwrap();
-        assert_eq!(buf, b"a\none\n\nb\ntwo\n");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        {
+            let mut output = QueryOutput::new(&mut stdout, &mut stderr, Options::default());
+            output.records([("oxford", "a", "one")]).unwrap();
+            output.records([("oxford", "b", "two\n")]).unwrap();
+        }
+        assert_eq!(stdout, b"a\none\n\nb\ntwo\n");
+        assert!(stderr.is_empty());
     }
 
     #[test]
     fn show_dictionary_uses_bracket_title_and_verbatim_definition() {
-        let mut buf = Vec::new();
-        write_record(
-            &mut buf,
+        let stdout = emit(
             "Oxford",
             "hello",
             "  keep \nand a blank\n",
@@ -829,17 +920,13 @@ mod tests {
                 show_dictionary: true,
                 ..Options::default()
             },
-            true,
-        )
-        .unwrap();
-        assert_eq!(buf, b"[Oxford] hello\n  keep \nand a blank\n");
+        );
+        assert_eq!(stdout, b"[Oxford] hello\n  keep \nand a blank\n");
     }
 
     #[test]
     fn default_output_makes_html_definitions_readable() {
-        let mut buf = Vec::new();
-        write_record(
-            &mut buf,
+        let stdout = emit(
             "oxford",
             "hello",
             concat!(
@@ -856,11 +943,9 @@ mod tests {
                 r#"<span class="italic">hollo</span>"#,
             ),
             Options::default(),
-            true,
-        )
-        .unwrap();
+        );
         assert_eq!(
-            buf,
+            stdout,
             concat!(
                 "hello\n",
                 "hello (亦作 hallo 或 hullo) exclamation\n",
@@ -874,9 +959,7 @@ mod tests {
 
     #[test]
     fn raw_keeps_stored_definition_markup() {
-        let mut buf = Vec::new();
-        write_record(
-            &mut buf,
+        let stdout = emit(
             "oxford",
             "hello",
             "<span>hello &amp; world</span>",
@@ -884,54 +967,25 @@ mod tests {
                 raw: true,
                 ..Options::default()
             },
-            true,
-        )
-        .unwrap();
-        assert_eq!(buf, b"hello\n<span>hello &amp; world</span>\n");
+        );
+        assert_eq!(stdout, b"hello\n<span>hello &amp; world</span>\n");
     }
 
     #[test]
     fn readable_output_strips_scripts_and_decodes_entities() {
-        let mut buf = Vec::new();
-        write_record(
-            &mut buf,
+        let stdout = emit(
             "oxford",
             "a",
             "<script>alert(1)</script><p>A&nbsp;B &amp; C</p><p>second</p>",
             Options::default(),
-            true,
-        )
-        .unwrap();
-        assert_eq!(buf, b"a\nA B & C\nsecond\n");
+        );
+        assert_eq!(stdout, b"a\nA B & C\nsecond\n");
     }
 
     #[test]
     fn plain_text_with_less_than_stays_verbatim() {
-        let mut buf = Vec::new();
-        write_record(
-            &mut buf,
-            "oxford",
-            "n",
-            "n. a < b\n",
-            Options::default(),
-            true,
-        )
-        .unwrap();
-        assert_eq!(buf, b"n\nn. a < b\n");
-    }
-
-    fn rendered(headword: &str, definition: &str, options: Options) -> String {
-        let mut buf = Vec::new();
-        write_record(
-            &mut buf,
-            "arbitrary import name",
-            headword,
-            definition,
-            options,
-            true,
-        )
-        .unwrap();
-        String::from_utf8(buf).unwrap()
+        let stdout = emit("oxford", "n", "n. a < b\n", Options::default());
+        assert_eq!(stdout, b"n\nn. a < b\n");
     }
 
     const POST: &str = include_str!("../tests/fixtures/post.html");
@@ -1330,8 +1384,215 @@ mod tests {
 
     #[test]
     fn miss_uses_the_contract_prefix() {
-        let mut buf = Vec::new();
-        write_miss(&mut buf, "helo").unwrap();
-        assert_eq!(buf, b"No entry found for: helo\n");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        QueryOutput::new(&mut stdout, &mut stderr, Options::default())
+            .miss("helo")
+            .unwrap();
+        assert!(stdout.is_empty());
+        assert_eq!(stderr, b"No entry found for: helo\n");
+    }
+
+    #[test]
+    fn empty_records_write_nothing_and_do_not_affect_later_separators() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        {
+            let mut output = QueryOutput::new(&mut stdout, &mut stderr, Options::default());
+            output.records(std::iter::empty()).unwrap();
+            output.records([("oxford", "a", "one")]).unwrap();
+            output.records(Vec::<(&str, &str, &str)>::new()).unwrap();
+            output.records([("oxford", "b", "two\n")]).unwrap();
+        }
+        assert_eq!(stdout, b"a\none\n\nb\ntwo\n");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn miss_then_records_has_no_leading_blank_line() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        {
+            let mut output = QueryOutput::new(&mut stdout, &mut stderr, Options::default());
+            output.miss("helo").unwrap();
+            output.records([("oxford", "hello", "world")]).unwrap();
+        }
+        assert_eq!(stderr, b"No entry found for: helo\n");
+        assert_eq!(stdout, b"hello\nworld\n");
+    }
+
+    #[test]
+    fn stdout_failure_before_first_record_does_not_insert_separator_on_retry() {
+        let mut stdout = FailAfter {
+            inner: Vec::new(),
+            remaining: 0,
+            failed: false,
+        };
+        let mut stderr = Vec::new();
+        {
+            let mut output = QueryOutput::new(&mut stdout, &mut stderr, Options::default());
+            let error = output.records([("oxford", "a", "one")]).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("failed to write query result to stdout"),
+                "{error:#}"
+            );
+            output.records([("oxford", "a", "one")]).unwrap();
+        }
+        assert_eq!(stdout.inner, b"a\none\n");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn mid_record_stdout_failure_does_not_insert_separator_on_retry() {
+        let mut stdout = FailAfter {
+            inner: Vec::new(),
+            remaining: 2,
+            failed: false,
+        };
+        let mut stderr = Vec::new();
+        {
+            let mut output = QueryOutput::new(&mut stdout, &mut stderr, Options::default());
+            let error = output.records([("oxford", "a", "one")]).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("failed to write query result to stdout"),
+                "{error:#}"
+            );
+            output.records([("oxford", "a", "one")]).unwrap();
+        }
+        assert_eq!(stdout.inner, b"a\na\none\n");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn stdout_failure_after_success_keeps_separator_for_later_record() {
+        let mut stdout = FailAfter {
+            inner: Vec::new(),
+            remaining: 6,
+            failed: false,
+        };
+        let mut stderr = Vec::new();
+        {
+            let mut output = QueryOutput::new(&mut stdout, &mut stderr, Options::default());
+            output.records([("oxford", "a", "one")]).unwrap();
+            let error = output.records([("oxford", "b", "two\n")]).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("failed to write query result to stdout"),
+                "{error:#}"
+            );
+            output.records([("oxford", "c", "three")]).unwrap();
+        }
+        assert_eq!(stdout.inner, b"a\none\n\nc\nthree\n");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn stderr_failure_then_successful_record_has_no_leading_blank_line() {
+        let mut stdout = Vec::new();
+        let mut stderr = FailAfter {
+            inner: Vec::new(),
+            remaining: 0,
+            failed: false,
+        };
+        {
+            let mut output = QueryOutput::new(&mut stdout, &mut stderr, Options::default());
+            let error = output.miss("helo").unwrap_err();
+            assert!(
+                format!("{error:#}").contains("failed to write query diagnostic to stderr"),
+                "{error:#}"
+            );
+            output.records([("oxford", "a", "one")]).unwrap();
+        }
+        assert_eq!(stdout, b"a\none\n");
+        assert!(stderr.inner.is_empty());
+    }
+
+    #[test]
+    fn failure_after_earlier_record_in_same_records_batch_keeps_separator() {
+        let mut stdout = FailAfter {
+            inner: Vec::new(),
+            remaining: 6,
+            failed: false,
+        };
+        let mut stderr = Vec::new();
+        {
+            let mut output = QueryOutput::new(&mut stdout, &mut stderr, Options::default());
+            let error = output
+                .records([("oxford", "a", "one"), ("oxford", "b", "two\n")])
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("failed to write query result to stdout"),
+                "{error:#}"
+            );
+            output.records([("oxford", "c", "three")]).unwrap();
+        }
+        assert_eq!(stdout.inner, b"a\none\n\nc\nthree\n");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn automatic_dictionary_names_are_per_records_call_not_across_calls() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        {
+            let mut output = QueryOutput::new(&mut stdout, &mut stderr, Options::default());
+            output.records([("oxford", "a", "one")]).unwrap();
+            output.records([("webster", "a", "two")]).unwrap();
+            output
+                .records([("oxford", "b", "three"), ("webster", "b", "four")])
+                .unwrap();
+        }
+        assert_eq!(
+            stdout,
+            concat!(
+                "a\none\n",
+                "\n",
+                "a\ntwo\n",
+                "\n",
+                "[oxford] b\nthree\n",
+                "\n",
+                "[webster] b\nfour\n",
+            )
+            .as_bytes()
+        );
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn raw_disables_automatic_dictionary_names_but_explicit_flag_is_honored() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        {
+            let mut output = QueryOutput::new(
+                &mut stdout,
+                &mut stderr,
+                Options {
+                    raw: true,
+                    ..Options::default()
+                },
+            );
+            output
+                .records([("oxford", "a", "one"), ("webster", "a", "two")])
+                .unwrap();
+        }
+        assert_eq!(stdout, b"a\none\n\na\ntwo\n");
+        assert!(stderr.is_empty());
+
+        stdout.clear();
+        {
+            let mut output = QueryOutput::new(
+                &mut stdout,
+                &mut stderr,
+                Options {
+                    show_dictionary: true,
+                    raw: true,
+                    ..Options::default()
+                },
+            );
+            output
+                .records([("oxford", "a", "one"), ("webster", "a", "two")])
+                .unwrap();
+        }
+        assert_eq!(stdout, b"[oxford] a\none\n\n[webster] a\ntwo\n");
+        assert!(stderr.is_empty());
     }
 }
