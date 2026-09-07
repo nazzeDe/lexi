@@ -39,6 +39,7 @@ fn no_arguments_matches_long_help_without_opening_the_database() {
     assert!(text(&no_args.stdout).contains("--import <PATH>"));
     assert!(text(&no_args.stdout).contains("--show-dictionary"));
     assert!(text(&no_args.stdout).contains("--raw"));
+    assert!(text(&no_args.stdout).contains("--full"));
     assert!(no_args.stderr.is_empty());
     assert!(help.stderr.is_empty());
     assert!(!data_home.path().join("lexi/lexi.db").exists());
@@ -63,6 +64,13 @@ fn invalid_arguments_and_mode_conflicts_exit_two_on_stderr() {
         vec!["--list", "--force"],
         vec!["--remove", "oxford", "--show-dictionary"],
         vec!["--list", "--raw"],
+        vec!["--full"],
+        vec!["hello", "--full", "--raw"],
+        vec!["--list", "--full"],
+        vec!["--remove", "oxford", "--full"],
+        vec!["--import", "dict.jsonl", "--name", "test", "--full"],
+        vec!["--help", "--full"],
+        vec!["--version", "--full"],
         vec!["--import", "dict.jsonl"],
         vec!["--import", "dict.jsonl", "--name", "   "],
         vec!["--import", "dict.jsonl", "--name", ""],
@@ -93,6 +101,7 @@ fn invalid_arguments_and_mode_conflicts_exit_two_on_stderr() {
             "missing argument error for {args:?}: {}",
             text(&output.stderr)
         );
+        assert!(!data_home.path().join("lexi/lexi.db").exists());
     }
 }
 

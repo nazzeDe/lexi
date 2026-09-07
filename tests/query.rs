@@ -155,9 +155,99 @@ fn query_uses_all_dictionaries_in_primary_key_order_without_deduping() {
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
     assert_eq!(
         text(&output.stdout),
-        "hello\noxford first\n\nhello\noxford second\n\nhello\nlongman\n"
+        "[oxford] hello\noxford first\n\n[oxford] hello\noxford second\n\n[longman] hello\nlongman\n"
     );
     assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn raw_never_adds_automatic_dictionary_names_and_full_does() {
+    let data_home = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    for name in ["first", "second"] {
+        import(
+            data_home.path(),
+            files.path(),
+            name,
+            "{\"headword\":\"word\",\"definition\":\"<p>definition</p>\"}\n",
+        );
+    }
+    let raw = run(data_home.path(), &["word", "--raw"]);
+    assert_eq!(raw.status.code(), Some(0));
+    assert_eq!(
+        text(&raw.stdout),
+        "word\n<p>definition</p>\n\nword\n<p>definition</p>\n"
+    );
+    let shown = run(data_home.path(), &["word", "--raw", "--show-dictionary"]);
+    assert_eq!(
+        text(&shown.stdout),
+        "[first] word\n<p>definition</p>\n\n[second] word\n<p>definition</p>\n"
+    );
+    let full = run(data_home.path(), &["word", "--full"]);
+    assert_eq!(full.status.code(), Some(0));
+    assert_eq!(
+        text(&full.stdout),
+        "[first] word\ndefinition\n\n[second] word\ndefinition\n"
+    );
+}
+
+#[test]
+fn structured_modes_and_pipe_output_use_the_same_content_layers() {
+    let data_home = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    let definition = include_str!("fixtures/post.html");
+    let record = serde_json::json!({"headword": "post", "definition": definition});
+    import(
+        data_home.path(),
+        files.path(),
+        "synthetic",
+        record.to_string(),
+    );
+    let default = run(data_home.path(), &["post"]);
+    let full = run(data_home.path(), &["post", "--full"]);
+    let raw = run(data_home.path(), &["post", "--raw"]);
+    for output in [&default, &full, &raw] {
+        assert_eq!(output.status.code(), Some(0));
+        assert!(output.stderr.is_empty());
+        assert!(!output.stdout.contains(&0x1b));
+    }
+    assert!(
+        text(&default.stdout)
+            .ends_with("Omitted: 2 examples and etymology; use --full to show all.\n")
+    );
+    assert!(text(&full.stdout).contains("Second marker example."));
+    assert!(text(&full.stdout).contains("An old source."));
+    assert!(!text(&full.stdout).contains("Omitted:"));
+    assert_eq!(text(&raw.stdout), format!("post\n{definition}"));
+    let narrow_env = Command::new(env!("CARGO_BIN_EXE_lexi"))
+        .arg("post")
+        .env("XDG_DATA_HOME", data_home.path())
+        .env("COLUMNS", "4")
+        .env("TERM", "xterm-256color")
+        .env("CLICOLOR_FORCE", "1")
+        .output()
+        .unwrap();
+    assert_eq!(narrow_env.stdout, default.stdout);
+}
+
+#[test]
+fn batch_provenance_is_decided_per_terms_selected_matches() {
+    let data_home = TempDir::new().unwrap();
+    let files = TempDir::new().unwrap();
+    import(
+        data_home.path(),
+        files.path(),
+        "first",
+        "{\"headword\":\"one\",\"definition\":\"first\"}\n",
+    );
+    import(
+        data_home.path(),
+        files.path(),
+        "second",
+        "{\"headword\":\"two\",\"definition\":\"second\"}\n",
+    );
+    let output = run(data_home.path(), &["one", "two"]);
+    assert_eq!(text(&output.stdout), "one\nfirst\n\ntwo\nsecond\n");
 }
 
 #[test]
@@ -218,7 +308,10 @@ fn dictionary_filter_order_does_not_override_primary_key_order() {
     );
 
     assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
-    assert_eq!(text(&output.stdout), "bank\nn. 银行\n\nbank\nn. 河岸\n");
+    assert_eq!(
+        text(&output.stdout),
+        "[oxford] bank\nn. 银行\n\n[longman] bank\nn. 河岸\n"
+    );
 }
 
 #[test]

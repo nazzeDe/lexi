@@ -78,6 +78,7 @@ fn run(mode: Mode) -> Result<u8, CommandError> {
             dictionaries,
             show_dictionary,
             raw,
+            full,
         } => {
             let terms = headwords
                 .iter()
@@ -96,8 +97,12 @@ fn run(mode: Mode) -> Result<u8, CommandError> {
                 &storage,
                 &terms,
                 &dictionaries,
-                show_dictionary,
-                raw,
+                output::Options {
+                    show_dictionary,
+                    raw,
+                    full,
+                    terminal: output::Terminal::detect(),
+                },
                 &mut stdout,
                 &mut stderr,
             )

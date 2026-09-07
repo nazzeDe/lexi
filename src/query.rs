@@ -16,8 +16,7 @@ pub fn run(
     storage: &Storage,
     terms: &[QueryTerm],
     dictionaries: &[DictionaryName],
-    show_dictionary: bool,
-    raw: bool,
+    options: output::Options,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<Outcome> {
@@ -36,14 +35,22 @@ pub fn run(
             missing = true;
             continue;
         }
+        let multiple_dictionaries = matches.first().is_some_and(|first| {
+            matches
+                .iter()
+                .any(|entry| entry.dictionary_name() != first.dictionary_name())
+        });
+        let record_options = output::Options {
+            show_dictionary: options.show_dictionary || (!options.raw && multiple_dictionaries),
+            ..options
+        };
         for entry in &matches {
             output::write_record(
                 stdout,
                 entry.dictionary_name(),
                 entry.headword(),
                 entry.definition(),
-                show_dictionary,
-                raw,
+                record_options,
                 first_record,
             )
             .context("failed to write query result to stdout")?;
@@ -77,6 +84,7 @@ fn select_matches(term: &QueryTerm, candidates: Vec<StoredEntry>) -> Vec<StoredE
 #[cfg(test)]
 mod tests {
     use super::{Outcome, run, select_matches};
+    use crate::output::Options;
     use crate::record::{DictionaryName, Entry, QueryTerm};
     use crate::storage::Storage;
     use tempfile::TempDir;
@@ -117,8 +125,7 @@ mod tests {
             &storage,
             &[term("hello")],
             &[],
-            false,
-            false,
+            Options::default(),
             &mut stdout,
             &mut stderr,
         )
@@ -145,8 +152,10 @@ mod tests {
             &storage,
             &[term("hello")],
             &[],
-            true,
-            false,
+            Options {
+                show_dictionary: true,
+                ..Options::default()
+            },
             &mut stdout,
             &mut stderr,
         )
@@ -168,8 +177,7 @@ mod tests {
             &storage,
             &[term("hello")],
             &[],
-            false,
-            false,
+            Options::default(),
             &mut stdout,
             &mut stderr,
         )
@@ -189,8 +197,7 @@ mod tests {
             &storage,
             &[term("hello"), term("helo"), term("hello")],
             &[],
-            false,
-            false,
+            Options::default(),
             &mut stdout,
             &mut stderr,
         )

@@ -24,8 +24,15 @@ pub struct Cli {
     #[arg(long)]
     pub show_dictionary: bool,
 
-    #[arg(long)]
+    #[arg(
+        long,
+        conflicts_with = "full",
+        help = "Print the stored definition unchanged"
+    )]
     pub raw: bool,
+
+    #[arg(long, help = "Include every example and etymology in readable output")]
+    pub full: bool,
 
     #[arg(long, value_name = "PATH")]
     pub import: Option<PathBuf>,
@@ -58,6 +65,7 @@ pub enum Mode {
         dictionaries: Vec<String>,
         show_dictionary: bool,
         raw: bool,
+        full: bool,
     },
     Import {
         path: PathBuf,
@@ -132,7 +140,8 @@ fn validate(cli: Cli) -> Result<Mode, clap::Error> {
                 || cli.force
                 || !cli.dictionary.is_empty()
                 || cli.show_dictionary
-                || cli.raw,
+                || cli.raw
+                || cli.full,
             "--help and --version do not accept business options",
         )?;
         return Ok(if cli.help { Mode::Help } else { Mode::Version });
@@ -148,13 +157,14 @@ fn validate(cli: Cli) -> Result<Mode, clap::Error> {
             dictionaries: cli.dictionary,
             show_dictionary: cli.show_dictionary,
             raw: cli.raw,
+            full: cli.full,
         });
     }
 
     if has_import {
         reject_if(
-            !cli.dictionary.is_empty() || cli.show_dictionary || cli.raw,
-            "--dictionary, --show-dictionary, and --raw are only valid with query mode",
+            !cli.dictionary.is_empty() || cli.show_dictionary || cli.raw || cli.full,
+            "--dictionary, --show-dictionary, --raw, and --full are only valid with query mode",
         )?;
         let name = cli
             .name
@@ -178,7 +188,8 @@ fn validate(cli: Cli) -> Result<Mode, clap::Error> {
                 || cli.force
                 || !cli.dictionary.is_empty()
                 || cli.show_dictionary
-                || cli.raw,
+                || cli.raw
+                || cli.full,
             "--list does not accept import or query options",
         )?;
         return Ok(Mode::List);
@@ -189,7 +200,8 @@ fn validate(cli: Cli) -> Result<Mode, clap::Error> {
             || cli.force
             || !cli.dictionary.is_empty()
             || cli.show_dictionary
-            || cli.raw,
+            || cli.raw
+            || cli.full,
         "--remove does not accept import or query options",
     )?;
     Ok(Mode::Remove {
