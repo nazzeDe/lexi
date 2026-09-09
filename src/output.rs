@@ -84,9 +84,9 @@ impl<'a> QueryOutput<'a> {
         definition: &str,
         show_dictionary: bool,
     ) -> io::Result<()> {
-        if self.wrote_record {
-            writeln!(self.stdout)?;
-        }
+ //       if self.wrote_record {
+ //           writeln!(self.stdout)?;
+ //       }
         let title = if show_dictionary {
             format!("[{dictionary_name}] {headword}")
         } else {
@@ -272,7 +272,6 @@ fn write_blocks(
             }
             Block::Label(text) => {
                 if !text.is_empty() {
-                    writeln!(writer)?;
                     let style = if is_part_of_speech(text) {
                         Style::Heading
                     } else {
@@ -282,9 +281,9 @@ fn write_blocks(
                 }
             }
             Block::Sense { number, text } => {
-                if !number.is_empty() || !text.is_empty() {
-                    writeln!(writer)?;
-                }
+                // if !number.is_empty() || !text.is_empty() {
+                //     writeln!(writer)?;
+                // }
                 definition_indent = 2 + if number.is_empty() {
                     0
                 } else {
@@ -314,7 +313,6 @@ fn write_blocks(
                     " ".repeat(definition_indent + usize::from(*subsense && !starts_subsense) * 2);
                 let continuation = " ".repeat(definition_indent + usize::from(*subsense) * 2);
                 let text = if *starts_subsense {
-                    writeln!(writer)?;
                     format!("- {text}")
                 } else {
                     text.clone()
@@ -334,7 +332,6 @@ fn write_blocks(
                 subsense,
             } => {
                 if options.full || *first_direct {
-                    writeln!(writer)?;
                     let initial = " ".repeat(definition_indent + usize::from(*subsense) * 2);
                     let continuation = format!("{initial}  ");
                     for (index, line) in lines.iter().enumerate() {
